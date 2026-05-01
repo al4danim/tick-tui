@@ -3,10 +3,7 @@ package tui
 import (
 	"regexp"
 	"strings"
-	"time"
 	"unicode"
-
-	"github.com/charmbracelet/lipgloss"
 )
 
 // atWordRe matches a trailing @prefix. Using [^@\s]* instead of \w* so CJK
@@ -48,11 +45,11 @@ func computeProjectGhost(value string, projects []string) string {
 
 // renderTitleWithGhost renders the title input inline as:
 //
-//	<before cursor><cursor char><ghost><after cursor>
+//	<before><reverse-cursor-char><after><ghost>
 //
-// The ghost text is rendered dim. The cursor position character is highlighted
-// with a block cursor (▎ appended). This function returns a plain string
-// suitable for embedding in a lipgloss row.
+// The cursor is shown as a reverse-video block over the character beneath it
+// (or a reverse-video space when the cursor sits at end-of-text). Ghost text
+// is rendered dim and only at end-of-text.
 func renderTitleWithGhost(value string, pos int, ghost string, active bool) string {
 	if !active {
 		return value
@@ -63,33 +60,27 @@ func renderTitleWithGhost(value string, pos int, ghost string, active bool) stri
 	if pos > len(runes) {
 		pos = len(runes)
 	}
-	before := string(runes[:pos])
-	after := string(runes[pos:])
-	cursorIndicator := styleBlue.Render("▎")
-	if after != "" {
-		// Cursor is mid-text: ghost would appear at wrong position, suppress it.
-		return styleUnderline.Render(before) + cursorIndicator + styleDim.Render(after)
+	if pos < len(runes) {
+		// Cursor mid-text: reverse the character at cursor position; suppress ghost.
+		before := string(runes[:pos])
+		at := string(runes[pos])
+		after := string(runes[pos+1:])
+		return before + styleCursor.Render(at) + after
 	}
-	// Cursor is at end: render ghost after cursor indicator.
-	return styleUnderline.Render(before) + cursorIndicator + styleDim.Render(ghost)
+	// Cursor at end: reverse a space, then optional dim ghost.
+	return value + styleCursor.Render(" ") + styleDim.Render(ghost)
 }
 
 // renderProjectField renders the project field inline, with ghost-text autocomplete.
 func renderProjectField(value string, projects []string, active bool) string {
 	if active {
 		ghost := computeProjectGhost(value, projects)
-		return "@" + styleUnderline.Render(value) + styleBlue.Render("▎") + styleDim.Render(ghost)
+		return "@" + value + styleCursor.Render(" ") + styleDim.Render(ghost)
 	}
 	if value == "" {
 		return ""
 	}
-	return styleCyan.Render("@" + value)
-}
-
-// renderDateEditor returns the inline date editor row string.
-func renderDateEditor(d time.Time) string {
-	dateStr := d.Format("2006-01-02")
-	return styleDim.Render("       ↑/↓  ") + lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Render(dateStr)
+	return "@" + value
 }
 
 // isWordChar matches \w characters for the @-completion regex.

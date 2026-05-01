@@ -5,19 +5,19 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/yaoyi/tick-tui/internal/api"
+	"github.com/al4danim/tick-tui/internal/store"
 )
 
-// APIClient is the subset of *api.Client methods used by the TUI.
-// Defined as an interface so tests can inject a stub without a real server.
+// APIClient is the subset of *store.Store methods used by the TUI.
+// (Name kept for diff stability; "Store" would be more accurate now.)
 type APIClient interface {
-	GetToday() (*api.TodayResponse, error)
-	GetProjects() ([]api.ProjectItem, error)
-	Create(text, date string) (*api.Feature, error)
-	Update(id int64, title, project string, date *string) (*api.Feature, error)
-	MarkDone(id int64) (*api.Feature, error)
-	Undone(id int64) (*api.Feature, error)
-	Delete(id int64) error
+	GetToday() (*store.TodayResponse, error)
+	GetProjects() ([]store.ProjectItem, error)
+	Create(text, date string) (*store.Feature, error)
+	Update(id string, title, project string, date *string) (*store.Feature, error)
+	MarkDone(id string) (*store.Feature, error)
+	Undone(id string) (*store.Feature, error)
+	Delete(id string) error
 }
 
 // mode represents which state the TUI is in.
@@ -52,13 +52,13 @@ const (
 // row is one entry in the rendered list.
 type row struct {
 	kind    rowKind
-	feature api.Feature // valid only when kind==rowFeature
+	feature store.Feature // valid only when kind==rowFeature
 }
 
 // Model is the bubbletea application model.
 type Model struct {
 	mode         mode
-	today        api.TodayResponse
+	today        store.TodayResponse
 	cursor       int
 	rows         []row
 	field        editField
@@ -67,9 +67,9 @@ type Model struct {
 	editDate     time.Time
 	dateModified bool   // true only when user has explicitly changed the date field
 	editingDone  bool   // true when editing a done feature (date-only edit mode)
-	editingID    int64  // 0 = new feature
-	pendingID    int64  // target for U / D / grace operations
-	graceID      int64  // feature being held in grace period
+	editingID    string // empty = new feature
+	pendingID    string // target for U / D / grace operations
+	graceID      string // feature being held in grace period
 	apiClient    APIClient
 	err          error
 	width        int
@@ -79,6 +79,12 @@ type Model struct {
 	helpExpanded bool
 	projects     []string // project names for ghost-text autocomplete
 	loading      bool
+	count        int    // vim-style numeric prefix: e.g. typing 5 then j moves down 5 rows
+	addSticky    bool   // "a": stay in add mode after each save until ESC / empty submit
+	lastProject  string // last project value submitted; pre-fills the project field on next `a`
+	filterActive bool   // "p" toggle: when true, only rows matching activeProject are shown
+	activeProject string // project name to filter by (empty string == "no project" group)
+	pendingReload bool  // a watcher event arrived while the user was mid-flow; reload when we land back in modeList
 }
 
 // NewModel builds an initial Model ready for Init.
@@ -104,7 +110,7 @@ func NewModel(client APIClient) Model {
 
 // currentFeature returns the feature at the current cursor position, or nil
 // if cursor is on a separator or out of bounds.
-func (m *Model) currentFeature() *api.Feature {
+func (m *Model) currentFeature() *store.Feature {
 	if m.cursor < 0 || m.cursor >= len(m.rows) {
 		return nil
 	}
@@ -117,30 +123,55 @@ func (m *Model) currentFeature() *api.Feature {
 }
 
 // buildRows reconstructs m.rows from m.today.
+// When filterActive is true, only features matching activeProject are kept
+// (empty string matches the "no project" group).
 // Pending features are grouped by project; groups are ordered by feature count
 // descending. Within each group, original server order is preserved.
 // Then a separator (only if both sides non-empty), then done features.
 func (m *Model) buildRows() {
-	rows := make([]row, 0, len(m.today.Pending)+len(m.today.Done)+1)
-	for _, f := range groupByProject(m.today.Pending) {
+	pending := m.today.Pending
+	done := m.today.Done
+	if m.filterActive {
+		pending = filterByProject(pending, m.activeProject)
+		done = filterByProject(done, m.activeProject)
+	}
+
+	rows := make([]row, 0, len(pending)+len(done)+1)
+	for _, f := range groupByProject(pending) {
 		rows = append(rows, row{kind: rowFeature, feature: f})
 	}
-	if len(m.today.Pending) > 0 && len(m.today.Done) > 0 {
+	if len(pending) > 0 && len(done) > 0 {
 		rows = append(rows, row{kind: rowSeparator})
 	}
-	for _, f := range m.today.Done {
+	for _, f := range done {
 		rows = append(rows, row{kind: rowFeature, feature: f})
 	}
 	m.rows = rows
 }
 
+// filterByProject returns features whose project matches the target.
+// An empty target matches features with no project assigned.
+func filterByProject(features []store.Feature, target string) []store.Feature {
+	out := make([]store.Feature, 0, len(features))
+	for _, f := range features {
+		name := ""
+		if f.ProjectName != nil {
+			name = *f.ProjectName
+		}
+		if name == target {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // groupByProject returns features re-ordered so that features sharing a project
 // are contiguous, and groups are ordered by group size descending.
 // Ties are broken by first-appearance order in the input.
-func groupByProject(features []api.Feature) []api.Feature {
+func groupByProject(features []store.Feature) []store.Feature {
 	type group struct {
 		name  string
-		items []api.Feature
+		items []store.Feature
 		seen  int
 	}
 	groups := map[string]*group{}
@@ -153,7 +184,7 @@ func groupByProject(features []api.Feature) []api.Feature {
 		if g, ok := groups[name]; ok {
 			g.items = append(g.items, f)
 		} else {
-			groups[name] = &group{name: name, items: []api.Feature{f}, seen: i}
+			groups[name] = &group{name: name, items: []store.Feature{f}, seen: i}
 			order = append(order, name)
 		}
 	}
@@ -172,7 +203,7 @@ func groupByProject(features []api.Feature) []api.Feature {
 		}
 		return gi.seen < gj.seen
 	})
-	out := make([]api.Feature, 0, len(features))
+	out := make([]store.Feature, 0, len(features))
 	for _, name := range order {
 		out = append(out, groups[name].items...)
 	}

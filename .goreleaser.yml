@@ -1,0 +1,73 @@
+version: 2
+
+project_name: tick
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: tick
+    main: ./cmd/tick
+    binary: tick
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+archives:
+  - id: tick
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+
+brews:
+  - name: tick
+    repository:
+      owner: al4danim
+      name: homebrew-tick
+      branch: main
+    homepage: https://github.com/al4danim/tick-tui
+    description: "Lazygit-style TUI for a markdown todo file"
+    license: MIT
+    install: |
+      bin.install "tick"
+    test: |
+      system "#{bin}/tick", "--version"
+
+release:
+  github:
+    owner: al4danim
+    name: tick-tui
+  draft: false
+  prerelease: auto

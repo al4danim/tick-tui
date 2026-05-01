@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/yaoyi/tick-tui/internal/api"
+	"github.com/al4danim/tick-tui/internal/store"
 )
 
 // View renders the full TUI screen.
@@ -27,6 +27,13 @@ func (m Model) renderTitleBar() string {
 	left := styleTitleBar.Render("Tick")
 	right := styleDim.Render(fmt.Sprintf(" · %d/%d done", m.today.DoneToday, m.today.TotalToday))
 	bar := left + right
+	if m.filterActive {
+		label := "@" + m.activeProject
+		if m.activeProject == "" {
+			label = "(no project)"
+		}
+		bar += styleBold.Render(" · " + label)
+	}
 	return lipgloss.NewStyle().MaxWidth(m.width).Render(bar)
 }
 
@@ -38,10 +45,6 @@ func (m Model) renderList() string {
 	}
 	// 2 = title bar + blank line
 	availableRows := m.height - 2 - footerLines
-	// The date editor row is inserted below the selected item; reserve space for it.
-	if m.mode == modeEdit && m.field == fieldDate {
-		availableRows--
-	}
 	if availableRows < 1 {
 		availableRows = 1
 	}
@@ -71,98 +74,83 @@ func (m Model) renderList() string {
 
 // buildListLines converts m.rows into rendered strings, handling edit mode.
 func (m Model) buildListLines() []string {
-	lines := make([]string, 0, len(m.rows)+1)
-	insertedDateEditor := false
-
+	lines := make([]string, 0, len(m.rows))
 	for i, r := range m.rows {
-		if r.kind == rowSeparator {
-			sep := renderSeparator(m.width)
-			lines = append(lines, sep)
-			continue
-		}
-
-		selected := i == m.cursor
-		inEdit := m.mode == modeEdit && selected
-
-		line := m.renderFeatureLine(r.feature, selected, inEdit)
-		lines = append(lines, line)
-
-		// Insert date editor row right after the selected line in edit+date mode
-		if inEdit && m.field == fieldDate && !insertedDateEditor {
-			lines = append(lines, renderDateEditor(m.editDate))
-			insertedDateEditor = true
+		switch r.kind {
+		case rowSeparator:
+			lines = append(lines, renderSeparator(m.width))
+		case rowDraft:
+			// Draft is always selected + always in edit mode.
+			lines = append(lines, m.renderFeatureLine(store.Feature{}, true, true, true))
+		default:
+			selected := i == m.cursor
+			inEdit := m.mode == modeEdit && selected
+			lines = append(lines, m.renderFeatureLine(r.feature, selected, inEdit, false))
 		}
 	}
 	return lines
 }
 
-func (m Model) renderFeatureLine(f api.Feature, selected bool, inEdit bool) string {
+func chip(label string) string {
+	return styleChip.Render("[" + label + "]")
+}
+
+func (m Model) renderFeatureLine(f store.Feature, selected, inEdit, isDraft bool) string {
 	isDone := f.IsDone == 1
 
-	// Checkbox
-	var checkbox string
+	checkbox := "[ ]"
 	if isDone {
-		checkbox = styleGreen.Render("[x]")
-	} else {
-		checkbox = "[ ]"
+		checkbox = "[x]"
 	}
 
-	// Prefix
 	prefix := "  "
-	if selected {
+	switch {
+	case isDraft:
+		prefix = styleBold.Render("+ ")
+	case selected:
 		prefix = styleSelected.Render("› ")
 	}
 
-	// Project suffix
-	var projectPart string
-	if inEdit && m.field == fieldProject {
-		projectPart = renderProjectField(m.projectInput.Value(), m.projects, true)
-	} else if inEdit && m.field == fieldTitle {
-		// Show project as normal, editable via project field
-		if f.ProjectName != nil && *f.ProjectName != "" {
-			projectPart = styleCyan.Render("@" + *f.ProjectName)
-		}
-	} else {
-		if f.ProjectName != nil && *f.ProjectName != "" {
-			pStyle := styleCyan
-			if isDone {
-				pStyle = styleDim
-			}
-			projectPart = pStyle.Render("@" + *f.ProjectName)
-		}
-	}
+	var titlePart, rightPart string
 
-	// Title part
-	var titlePart string
-	if inEdit && m.field == fieldTitle {
-		titlePart = renderTitleWithGhost(m.titleInput.Value(), m.titleInput.Position(), "", true)
-	} else if inEdit && m.field == fieldProject {
-		titlePart = m.titleInput.Value()
-	} else if inEdit && m.field == fieldDate {
-		// Done edit: keep original title look; pending edit on date never reaches here.
-		if isDone {
-			titlePart = styleDim.Render(f.Title)
-		} else {
+	if inEdit {
+		switch m.field {
+		case fieldTitle:
+			titlePart = renderTitleWithGhost(m.titleInput.Value(), m.titleInput.Position(), "", true)
+			// Show the current project alongside the field label so the user can
+			// see what will be submitted without Tab-ing into the project field.
+			if proj := strings.TrimSpace(m.projectInput.Value()); proj != "" {
+				rightPart = chip("title → @" + proj)
+			} else {
+				rightPart = chip("title")
+			}
+		case fieldProject:
 			titlePart = m.titleInput.Value()
+			if titlePart == "" {
+				titlePart = styleDim.Render("(title)")
+			}
+			rightPart = renderProjectField(m.projectInput.Value(), m.projects, true) + " " + chip("proj")
+		case fieldDate:
+			titlePart = f.Title
+			rightPart = m.editDate.Format("2006-01-02") + " " + chip("date")
 		}
-	} else if isDone {
-		titlePart = styleDim.Render(f.Title)
 	} else {
 		titlePart = f.Title
+		if f.ProjectName != nil && *f.ProjectName != "" {
+			rightPart = "@" + *f.ProjectName
+		}
+		if selected && !isDone {
+			titlePart = styleSelected.Render(titlePart)
+		}
 	}
 
-	if selected && !isDone {
-		titlePart = styleSelected.Render(titlePart)
-	}
-
-	// Build full line with padding
 	content := prefix + checkbox + " " + titlePart
-	if projectPart != "" {
-		content = padBetween(content, projectPart, m.width)
+	if rightPart != "" {
+		content = padBetween(content, rightPart, m.width)
 	}
 
+	// Done rows are dimmed as a whole — the only "color" semantic we keep.
 	if isDone {
-		// Always dim done feature rows, including in edit mode (date-only edit).
 		content = styleDim.Render(content)
 	}
 
@@ -200,16 +188,32 @@ func renderSeparator(width int) string {
 
 func (m Model) renderFooter() string {
 	if m.footerMsg != "" {
-		// Confirm / grace messages take priority
+		// Confirm / grace / sticky-add messages take priority over context help.
 		if m.err != nil {
 			return styleError.Render(m.footerMsg)
 		}
 		return m.footerMsg
 	}
+	if m.mode == modeEdit {
+		return styleDim.Render(editFooterHint(m))
+	}
 	if m.helpExpanded {
 		return longHelp
 	}
 	return styleDim.Render(shortHelp)
+}
+
+// editFooterHint returns the context help shown while editing.
+func editFooterHint(m Model) string {
+	switch m.field {
+	case fieldTitle:
+		return "Tab → project · Enter save · Esc cancel"
+	case fieldProject:
+		return "Tab → title · Enter save · Esc cancel"
+	case fieldDate:
+		return "↑/↓ ±1 day · Enter save · Esc cancel"
+	}
+	return "Enter save · Esc cancel"
 }
 
 // scrollWindow returns [start, end) indices such that cursor stays visible.

@@ -14,7 +14,8 @@ type keyMap struct {
 	Add       key.Binding
 	Edit      key.Binding
 	Delete    key.Binding
-	Refresh   key.Binding
+	Yank      key.Binding
+	Filter    key.Binding
 	Help      key.Binding
 	Quit      key.Binding
 	Undo      key.Binding
@@ -34,10 +35,11 @@ var keys = keyMap{
 	Last:      key.NewBinding(key.WithKeys("G"), key.WithHelp("G", "last in section")),
 	MarkDone:  key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "done")),
 	Untick:    key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "un-tick")),
-	Add:       key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add")),
+	Add:       key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add (streams)")),
 	Edit:      key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 	Delete:    key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete")),
-	Refresh:   key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+	Yank:      key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy title")),
+	Filter:    key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "filter project")),
 	Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	Undo:      key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "undo")),
@@ -48,11 +50,14 @@ var keys = keyMap{
 	Escape:    key.NewBinding(key.WithKeys("esc")),
 }
 
-const shortHelp = "a add · t done · e edit · D del · r refresh · ? help · q quit"
+const shortHelp = "a add · t done · e edit · p filter · y copy · D del · ? help · q quit"
 
-const longHelp = `Navigation:  j/k or ↑/↓ move · ] / [ jump next/prev project
-             g first · G last (within current section: pending or done) · r refresh
-Actions:     a add · e edit · t mark done · U un-tick · D delete
+const longHelp = `Navigation:  j/k or ↑/↓ move (Nj/Nk repeats N times, e.g. 5j)
+             ] / [ jump next/prev project
+             g first · G last (within current section: pending or done)
+Actions:     a add (streams: Enter saves & opens next; Esc/empty stops)
+             e edit · t mark done · U un-tick · y copy title · D delete
+             p toggle project filter (uses current row's project; press again to clear)
 Grace:       after t, press u within 3s to undo
 Edit fields: Tab next field · Shift+Tab prev · Enter save · ESC cancel
 Date field:  ↑/↓ ±1 day

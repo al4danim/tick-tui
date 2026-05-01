@@ -1,25 +1,35 @@
 package tui
 
 import (
+	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/yaoyi/tick-tui/internal/api"
+	"github.com/al4danim/tick-tui/internal/store"
 )
+
+// copyToClipboard is the clipboard write hook. Tests replace it with a stub.
+var copyToClipboard = clipboard.WriteAll
 
 // ----- messages -------------------------------------------------------------
 
-type todayLoadedMsg struct{ resp *api.TodayResponse }
+type todayLoadedMsg struct{ resp *store.TodayResponse }
 type projectsLoadedMsg struct{ names []string }
-type featureSavedMsg struct{ feature *api.Feature }
-type featureMarkedDoneMsg struct{ feature *api.Feature }
-type featureUntickedMsg struct{ feature *api.Feature }
-type featureDeletedMsg struct{ id int64 }
-type graceExpiredMsg struct{ id int64 }
+type featureSavedMsg struct{ feature *store.Feature }
+type featureMarkedDoneMsg struct{ feature *store.Feature }
+type featureUntickedMsg struct{ feature *store.Feature }
+type featureDeletedMsg struct{ id string }
+type graceExpiredMsg struct{ id string }
 type footerExpireMsg struct{}
 type errMsg struct{ err error }
+
+// FileChangedMsg fires when the watcher sees an external modification to
+// tasks.md. The cmd/tick wiring sends it via Program.Send. Exported so
+// the file-watcher goroutine in main can build it.
+type FileChangedMsg struct{}
 
 // ----- Init / Cmd builders --------------------------------------------------
 
@@ -52,7 +62,7 @@ func (m Model) cmdLoadProjects() tea.Cmd {
 	}
 }
 
-func (m Model) cmdMarkDone(id int64) tea.Cmd {
+func (m Model) cmdMarkDone(id string) tea.Cmd {
 	return func() tea.Msg {
 		f, err := m.apiClient.MarkDone(id)
 		if err != nil {
@@ -62,7 +72,7 @@ func (m Model) cmdMarkDone(id int64) tea.Cmd {
 	}
 }
 
-func (m Model) cmdUndone(id int64) tea.Cmd {
+func (m Model) cmdUndone(id string) tea.Cmd {
 	return func() tea.Msg {
 		f, err := m.apiClient.Undone(id)
 		if err != nil {
@@ -72,7 +82,7 @@ func (m Model) cmdUndone(id int64) tea.Cmd {
 	}
 }
 
-func (m Model) cmdDelete(id int64) tea.Cmd {
+func (m Model) cmdDelete(id string) tea.Cmd {
 	return func() tea.Msg {
 		if err := m.apiClient.Delete(id); err != nil {
 			return errMsg{err}
@@ -85,7 +95,7 @@ func (m Model) cmdSave() tea.Cmd {
 	titleVal := m.titleInput.Value()
 	projectVal := m.projectInput.Value()
 
-	if m.editingID == 0 {
+	if m.editingID == "" {
 		// New feature via POST.
 		// Only send a date when the user explicitly changed it; otherwise send ""
 		// so the server stores NULL rather than silently setting today.
@@ -120,7 +130,7 @@ func (m Model) cmdSave() tea.Cmd {
 	}
 }
 
-func cmdGraceTimer(id int64) tea.Cmd {
+func cmdGraceTimer(id string) tea.Cmd {
 	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 		return graceExpiredMsg{id}
 	})
@@ -146,8 +156,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.err = nil
 		m.today = *msg.resp
+		m.pendingReload = false
 		m.buildRows()
 		m.clampCursor()
+		// Sticky-add: a save just landed; reopen the edit panel for the next entry.
+		// (Re-running enterEditNew here, after buildRows, is the only place where
+		// the new draft row survives the reload-driven row rebuild.)
+		if m.addSticky && m.mode == modeList {
+			return m.enterEditNew()
+		}
 		return m, nil
 
 	case projectsLoadedMsg:
@@ -171,8 +188,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Only clear grace if it matches the current grace ID
 		if m.mode == modeGraceUndo && m.graceID == msg.id {
 			m.mode = modeList
-			m.graceID = 0
+			m.graceID = ""
 			m.footerMsg = ""
+			return m, m.drainPendingReload()
 		}
 		return m, nil
 
@@ -180,9 +198,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.footerMsg = ""
 		return m, nil
 
+	case FileChangedMsg:
+		// External edit (mobile sync, Obsidian, manual edit). Reload now if the
+		// user is just browsing; otherwise queue it so we don't blow away an
+		// in-flight edit, confirm prompt, or grace window.
+		if m.mode == modeList {
+			return m, m.cmdLoadToday()
+		}
+		m.pendingReload = true
+		return m, nil
+
 	case errMsg:
 		m.err = msg.err
 		m.footerMsg = "error: " + msg.err.Error()
+		// On any error, drop sticky-add so we don't auto-reopen edit on the next reload.
+		m.addSticky = false
 		return m, cmdFooterTimer()
 
 	case tea.KeyMsg:
@@ -207,16 +237,53 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// digitFromKey returns (digit, true) if msg is a single 0-9 rune.
+func digitFromKey(msg tea.KeyMsg) (int, bool) {
+	if msg.Type != tea.KeyRunes || len(msg.Runes) != 1 {
+		return 0, false
+	}
+	r := msg.Runes[0]
+	if r >= '0' && r <= '9' {
+		return int(r - '0'), true
+	}
+	return 0, false
+}
+
 func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Vim-style numeric prefix: digits accumulate into m.count.
+	// A leading lone "0" is ignored (no zero-step), but "0" after another digit
+	// is appended (so "10j" works).
+	if d, ok := digitFromKey(msg); ok {
+		if d == 0 && m.count == 0 {
+			return m, nil
+		}
+		m.count = m.count*10 + d
+		if m.count > 9999 {
+			m.count = 9999
+		}
+		return m, nil
+	}
+
+	// Any non-digit key consumes the prefix.
+	step := m.count
+	if step < 1 {
+		step = 1
+	}
+	m.count = 0
+
 	switch {
 	case key.Matches(msg, keys.Quit):
 		return m, tea.Quit
 
 	case key.Matches(msg, keys.Up):
-		m.moveCursor(-1)
+		for i := 0; i < step; i++ {
+			m.moveCursor(-1)
+		}
 
 	case key.Matches(msg, keys.Down):
-		m.moveCursor(1)
+		for i := 0; i < step; i++ {
+			m.moveCursor(1)
+		}
 
 	case key.Matches(msg, keys.NextGroup):
 		m.jumpProject(1)
@@ -233,11 +300,10 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Help):
 		m.helpExpanded = !m.helpExpanded
 
-	case key.Matches(msg, keys.Refresh):
-		m.loading = true
-		return m, m.cmdLoadToday()
-
 	case key.Matches(msg, keys.Add):
+		// `a` always streams: save → open next draft. ESC or empty submit ends.
+		m.addSticky = true
+		m.footerMsg = "+ keep adding · Esc to stop"
 		return m.enterEditNew()
 
 	case key.Matches(msg, keys.Edit):
@@ -251,8 +317,65 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Delete):
 		return m.handleDeletePrompt()
+
+	case key.Matches(msg, keys.Yank):
+		return m.handleYank()
+
+	case key.Matches(msg, keys.Filter):
+		return m.handleFilterToggle()
 	}
 	return m, nil
+}
+
+func (m Model) handleFilterToggle() (Model, tea.Cmd) {
+	if m.filterActive {
+		m.filterActive = false
+		m.activeProject = ""
+		m.buildRows()
+		m.clampCursor()
+		m.footerMsg = ""
+		return m, nil
+	}
+	// Pick the project from the row currently under the cursor.
+	f := m.currentFeature()
+	if f == nil {
+		// Cursor on separator or empty list: nothing to filter on.
+		return m, nil
+	}
+	proj := ""
+	if f.ProjectName != nil {
+		proj = *f.ProjectName
+	}
+	m.filterActive = true
+	m.activeProject = proj
+	m.buildRows()
+	m.cursor = 0
+	m.clampCursor()
+	return m, nil
+}
+
+func (m Model) handleYank() (Model, tea.Cmd) {
+	f := m.currentFeature()
+	if f == nil {
+		return m, nil
+	}
+	if err := copyToClipboard(f.Title); err != nil {
+		m.footerMsg = "copy failed: " + err.Error()
+		return m, cmdFooterTimer()
+	}
+	m.footerMsg = `copied "` + f.Title + `"`
+	return m, cmdFooterTimer()
+}
+
+// drainPendingReload returns a reload cmd if a watcher event arrived while we
+// were busy. Use at every transition back into modeList that doesn't already
+// trigger a reload via cmdSave / cmdUndone / cmdDelete / etc.
+func (m *Model) drainPendingReload() tea.Cmd {
+	if !m.pendingReload {
+		return nil
+	}
+	m.pendingReload = false
+	return m.cmdLoadToday()
 }
 
 func (m Model) handleGraceKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -260,13 +383,13 @@ func (m Model) handleGraceKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Undo: reverse the done mark
 		id := m.graceID
 		m.mode = modeList
-		m.graceID = 0
+		m.graceID = ""
 		m.footerMsg = ""
 		return m, m.cmdUndone(id)
 	}
 	// Any other key: leave grace and process key normally in list mode
 	m.mode = modeList
-	m.graceID = 0
+	m.graceID = ""
 	m.footerMsg = ""
 	return m.handleListKey(msg)
 }
@@ -275,38 +398,47 @@ func (m Model) handleConfirmUntickKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, keys.Yes) {
 		id := m.pendingID
 		m.mode = modeList
-		m.pendingID = 0
+		m.pendingID = ""
 		m.footerMsg = ""
 		return m, m.cmdUndone(id)
 	}
 	// Cancel
 	m.mode = modeList
-	m.pendingID = 0
+	m.pendingID = ""
 	m.footerMsg = ""
-	return m, nil
+	return m, m.drainPendingReload()
 }
 
 func (m Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, keys.Yes) {
 		id := m.pendingID
 		m.mode = modeList
-		m.pendingID = 0
+		m.pendingID = ""
 		m.footerMsg = ""
 		return m, m.cmdDelete(id)
 	}
 	// Cancel
 	m.mode = modeList
-	m.pendingID = 0
+	m.pendingID = ""
 	m.footerMsg = ""
-	return m, nil
+	return m, m.drainPendingReload()
 }
 
 func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keys.Escape):
+		m.addSticky = false
 		return m.exitEdit(false)
 
 	case key.Matches(msg, keys.Enter):
+		// New entries with an empty title get cancelled (also ends sticky streak).
+		// project alone (e.g. pre-filled from lastProject/activeProject) is not
+		// enough to mean "save" — without a title there is nothing to save.
+		if m.editingID == "" && strings.TrimSpace(m.titleInput.Value()) == "" {
+			m.addSticky = false
+			m.footerMsg = ""
+			return m.exitEdit(false)
+		}
 		return m.exitEdit(true)
 
 	case key.Matches(msg, keys.Tab):
@@ -380,11 +512,18 @@ func (m Model) updateActiveInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) enterEditNew() (Model, tea.Cmd) {
 	m.mode = modeEdit
-	m.editingID = 0
+	m.editingID = ""
 	m.editingDone = false
 	m.field = fieldTitle
 	m.titleInput.SetValue("")
-	m.projectInput.SetValue("")
+	// Pre-fill project: filter mode forces the active project; otherwise fall
+	// back to the last project the user submitted.
+	defaultProj := m.lastProject
+	if m.filterActive {
+		defaultProj = m.activeProject
+	}
+	m.projectInput.SetValue(defaultProj)
+	m.projectInput.CursorEnd()
 	m.editDate = time.Now()
 	m.dateModified = false
 	m.focusField()
@@ -434,19 +573,27 @@ func (m Model) enterEditExisting() (Model, tea.Cmd) {
 func (m Model) exitEdit(save bool) (Model, tea.Cmd) {
 	m.titleInput.Blur()
 	m.projectInput.Blur()
-	wasNew := m.editingID == 0
+	wasNew := m.editingID == ""
 	m.mode = modeList
 
 	if !save {
-		m.editingID = 0
+		m.editingID = ""
 		if wasNew {
 			m.buildRows()
 			m.clampCursor()
 		}
-		return m, nil
+		return m, m.drainPendingReload()
 	}
+	// Remember project for next `a`/`A`. Title typed via @-suffix in the title
+	// field is also captured so the next add inherits it too.
+	_, projFromTitle := extractProjectFromTitle(m.titleInput.Value())
+	proj := strings.TrimSpace(m.projectInput.Value())
+	if proj == "" {
+		proj = projFromTitle
+	}
+	m.lastProject = proj
 	cmd := m.cmdSave()
-	m.editingID = 0
+	m.editingID = ""
 	if wasNew {
 		// Drop draft row; reload from server will refresh with the new feature.
 		m.buildRows()
@@ -461,7 +608,7 @@ func (m Model) handleMarkDone() (Model, tea.Cmd) {
 		return m, nil
 	}
 	// Guard: this feature is already in its grace window — don't fire a second request.
-	if m.graceID != 0 && f.ID == m.graceID {
+	if m.graceID != "" && f.ID == m.graceID {
 		return m, nil
 	}
 	id := f.ID
