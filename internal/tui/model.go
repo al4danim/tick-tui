@@ -53,6 +53,7 @@ const (
 type row struct {
 	kind    rowKind
 	feature store.Feature // valid only when kind==rowFeature
+	daysAgo int           // 0 = today/pending, 1 = yesterday done
 }
 
 // Model is the bubbletea application model.
@@ -75,7 +76,9 @@ type Model struct {
 	width        int
 	height       int
 	footerMsg    string
-	footerExpire time.Time
+	footerToken   int        // incremented by setTransientFooter; expire msgs with stale tokens are discarded
+	footerErr     bool       // true when footerMsg is an error (controls red rendering)
+	graceDeadline time.Time  // when the grace window expires; used for countdown display
 	helpExpanded bool
 	projects     []string // project names for ghost-text autocomplete
 	loading      bool
@@ -127,24 +130,31 @@ func (m *Model) currentFeature() *store.Feature {
 // (empty string matches the "no project" group).
 // Pending features are grouped by project; groups are ordered by feature count
 // descending. Within each group, original server order is preserved.
-// Then a separator (only if both sides non-empty), then done features.
+// Then a separator (only when pending > 0 AND (today done > 0 OR yesterday done > 0)),
+// then today done features followed by yesterday done features (both share the same separator).
 func (m *Model) buildRows() {
 	pending := m.today.Pending
 	done := m.today.Done
+	doneYesterday := m.today.DoneYesterday
 	if m.filterActive {
 		pending = filterByProject(pending, m.activeProject)
 		done = filterByProject(done, m.activeProject)
+		doneYesterday = filterByProject(doneYesterday, m.activeProject)
 	}
 
-	rows := make([]row, 0, len(pending)+len(done)+1)
+	totalDone := len(done) + len(doneYesterday)
+	rows := make([]row, 0, len(pending)+totalDone+1)
 	for _, f := range groupByProject(pending) {
 		rows = append(rows, row{kind: rowFeature, feature: f})
 	}
-	if len(pending) > 0 && len(done) > 0 {
+	if len(pending) > 0 && totalDone > 0 {
 		rows = append(rows, row{kind: rowSeparator})
 	}
 	for _, f := range done {
-		rows = append(rows, row{kind: rowFeature, feature: f})
+		rows = append(rows, row{kind: rowFeature, feature: f, daysAgo: 0})
+	}
+	for _, f := range doneYesterday {
+		rows = append(rows, row{kind: rowFeature, feature: f, daysAgo: 1})
 	}
 	m.rows = rows
 }

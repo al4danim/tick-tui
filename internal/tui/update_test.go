@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +31,25 @@ func modelWithRows(pending, done []store.Feature) Model {
 	m.buildRows()
 	m.cursor = 0
 	return m
+}
+
+func modelWithRowsAndYesterday(pending, done, doneYesterday []store.Feature) Model {
+	m := NewModel(nil)
+	m.today = store.TodayResponse{
+		Pending:       pending,
+		Done:          done,
+		DoneYesterday: doneYesterday,
+		DoneToday:     len(done),
+		TotalToday:    len(pending) + len(done),
+	}
+	m.buildRows()
+	m.cursor = 0
+	return m
+}
+
+func yesterdayDoneFeature(id string, title string) store.Feature {
+	yesterday := "2026-04-30"
+	return store.Feature{ID: id, Title: title, IsDone: 1, CompletedAt: &yesterday, CreatedAt: "2026-04-30"}
 }
 
 func pressKey(s string) tea.KeyMsg {
@@ -1274,6 +1293,157 @@ func TestYank_clipboardErrorShowsFooter(t *testing.T) {
 	}
 }
 
+// --- yesterday done display ---
+
+// TestBuildRows_yesterdayDone verifies that yesterday done rows appear after
+// today done rows, and that daysAgo is set correctly.
+func TestBuildRows_yesterdayDone(t *testing.T) {
+	pending := []store.Feature{pendingFeature("p1", "todo")}
+	doneToday := []store.Feature{doneFeature("d1", "done today")}
+	doneYest := []store.Feature{yesterdayDoneFeature("y1", "done yesterday")}
+
+	m := modelWithRowsAndYesterday(pending, doneToday, doneYest)
+
+	// Expected layout: pending, separator, today done, yesterday done
+	if len(m.rows) != 4 {
+		t.Fatalf("rows: got %d want 4 (pending + sep + today-done + yesterday-done)", len(m.rows))
+	}
+	if m.rows[0].kind != rowFeature || m.rows[0].feature.ID != "p1" {
+		t.Errorf("row[0] should be pending p1; got %+v", m.rows[0])
+	}
+	if m.rows[1].kind != rowSeparator {
+		t.Errorf("row[1] should be separator; got %+v", m.rows[1])
+	}
+	if m.rows[2].kind != rowFeature || m.rows[2].feature.ID != "d1" {
+		t.Errorf("row[2] should be today-done d1; got %+v", m.rows[2])
+	}
+	if m.rows[2].daysAgo != 0 {
+		t.Errorf("today done row daysAgo: got %d want 0", m.rows[2].daysAgo)
+	}
+	if m.rows[3].kind != rowFeature || m.rows[3].feature.ID != "y1" {
+		t.Errorf("row[3] should be yesterday-done y1; got %+v", m.rows[3])
+	}
+	if m.rows[3].daysAgo != 1 {
+		t.Errorf("yesterday done row daysAgo: got %d want 1", m.rows[3].daysAgo)
+	}
+}
+
+// TestBuildRows_onlyYesterdayDone verifies that the separator still appears
+// when there are no today-done rows but there are yesterday-done rows.
+func TestBuildRows_onlyYesterdayDone(t *testing.T) {
+	pending := []store.Feature{pendingFeature("p1", "todo")}
+	doneYest := []store.Feature{yesterdayDoneFeature("y1", "done yesterday")}
+
+	m := modelWithRowsAndYesterday(pending, nil, doneYest)
+
+	// pending + separator + yesterday done
+	if len(m.rows) != 3 {
+		t.Fatalf("rows: got %d want 3", len(m.rows))
+	}
+	if m.rows[1].kind != rowSeparator {
+		t.Errorf("row[1] should be separator; got %+v", m.rows[1])
+	}
+	if m.rows[2].daysAgo != 1 {
+		t.Errorf("row[2] daysAgo: got %d want 1", m.rows[2].daysAgo)
+	}
+}
+
+// TestRenderFeatureLine_yesterdayHasDashOneDTag verifies that a row with
+// daysAgo=1 renders with "-1d" in its output.
+func TestRenderFeatureLine_yesterdayHasDashOneDTag(t *testing.T) {
+	m := modelWithRowsAndYesterday(nil, nil, []store.Feature{yesterdayDoneFeature("y1", "old task")})
+	m.width = 40
+	m.height = 24
+
+	// The yesterday row is at index 0 (no pending → no separator).
+	if len(m.rows) != 1 {
+		t.Fatalf("expected 1 row (yesterday only, no separator); got %d", len(m.rows))
+	}
+	f := m.rows[0].feature
+	line := m.renderFeatureLine(f, false, false, false, 1)
+
+	if !containsSubstring(line, "-1d") {
+		t.Errorf("yesterday done line should contain '-1d'; got %q", line)
+	}
+}
+
+// TestRenderFeatureLine_yesterdayWithProject shows "-1d @proj" on the right
+// (-1d sits before @project so the project chip stays at the row's right edge,
+// staying visually aligned with today rows that have no -1d).
+func TestRenderFeatureLine_yesterdayWithProject(t *testing.T) {
+	proj := "work"
+	f := store.Feature{ID: "y1", Title: "task", IsDone: 1, ProjectName: &proj}
+	yesterday := "2026-04-30"
+	f.CompletedAt = &yesterday
+
+	m := NewModel(nil)
+	m.width = 40
+	m.height = 24
+
+	line := m.renderFeatureLine(f, false, false, false, 1)
+
+	dashIdx := strings.Index(line, "-1d")
+	projIdx := strings.Index(line, "@work")
+	if dashIdx < 0 || projIdx < 0 {
+		t.Fatalf("line missing -1d or @work; got %q", line)
+	}
+	if dashIdx > projIdx {
+		t.Errorf("-1d should appear BEFORE @work; got %q", line)
+	}
+}
+
+// TestRenderFeatureLine_todayDone_noDashOneD verifies that today's done rows
+// do NOT get a "-1d" marker (daysAgo=0).
+func TestRenderFeatureLine_todayDone_noDashOneD(t *testing.T) {
+	m := modelWithRows(nil, []store.Feature{doneFeature("d1", "done today")})
+	m.width = 40
+	m.height = 24
+
+	f := m.rows[0].feature
+	line := m.renderFeatureLine(f, false, false, false, 0)
+
+	if containsSubstring(line, "-1d") {
+		t.Errorf("today done line should NOT contain '-1d'; got %q", line)
+	}
+}
+
+// TestFilter_yesterdayDoneAlsoFiltered verifies that project filter applies to
+// DoneYesterday rows as well as Pending and Done rows.
+func TestFilter_yesterdayDoneAlsoFiltered(t *testing.T) {
+	workProj := "work"
+	homeProj := "home"
+	yWork := store.Feature{ID: "y1", Title: "y-work", IsDone: 1, ProjectName: &workProj}
+	yHome := store.Feature{ID: "y2", Title: "y-home", IsDone: 1, ProjectName: &homeProj}
+	yesterday := "2026-04-30"
+	yWork.CompletedAt = &yesterday
+	yHome.CompletedAt = &yesterday
+
+	m := modelWithRowsAndYesterday(
+		[]store.Feature{featureWithProject("p1", "work task", "work")},
+		nil,
+		[]store.Feature{yWork, yHome},
+	)
+	m.cursor = 0 // cursor on "work" pending
+
+	newM, _ := update(m, pressKey("p"))
+
+	if !newM.filterActive {
+		t.Fatal("filterActive should be true")
+	}
+	// Expect: work pending + separator + work yesterday done (2 feature rows + 1 sep)
+	if len(newM.rows) != 3 {
+		t.Errorf("filtered rows: got %d want 3 (work-pending + sep + work-yesterday)", len(newM.rows))
+	}
+	// The last row should be the work yesterday feature.
+	last := newM.rows[len(newM.rows)-1]
+	if last.kind != rowFeature || last.feature.ID != "y1" {
+		t.Errorf("last row should be y1 (work yesterday); got %+v", last)
+	}
+	if last.daysAgo != 1 {
+		t.Errorf("yesterday row daysAgo: got %d want 1", last.daysAgo)
+	}
+}
+
 var errFakeClipboard = &clipboardErr{"no clipboard"}
 
 type clipboardErr struct{ s string }
@@ -1307,4 +1477,192 @@ func (s *stubClient) Undone(id string) (*store.Feature, error)    { return &stor
 func (s *stubClient) Delete(id string) error                    { return nil }
 
 
-func itoa(i int) string { return strconv.Itoa(i) }
+// itoa is defined in update.go (package tui), no duplicate needed here.
+
+// ---- new regression tests (footer bug fix) --------------------------------
+
+// TestFooterTimerTokenIsolation verifies that a stale footerExpireMsg (from an
+// earlier transient) does NOT clear a confirm prompt that was set afterward
+// without its own timer (fixes Bug 2 — the silent-delete race condition).
+func TestFooterTimerTokenIsolation(t *testing.T) {
+	m := modelWithRows([]store.Feature{pendingFeature("1", "task")}, nil)
+
+	// Step 1: trigger a transient (yank) which bumps footerToken to 1.
+	withCopyStub(t, func(s string) error { return nil })
+	m, _ = update(m, pressKey("y"))
+	staleToken := m.footerToken // = 1
+
+	// Step 2: enter confirm-delete which bumps footerToken to 2 and sets a
+	// different footerMsg without a timer.
+	m, _ = update(m, pressKey("D"))
+	confirmMsg := m.footerMsg
+	if confirmMsg == "" {
+		t.Fatal("setup: footerMsg should contain delete prompt after D")
+	}
+
+	// Step 3: inject the stale expire from step 1 — it should be discarded.
+	m, _ = update(m, footerExpireMsg{token: staleToken})
+
+	if m.footerMsg != confirmMsg {
+		t.Errorf("stale expire should not clear confirm prompt; got %q want %q", m.footerMsg, confirmMsg)
+	}
+	if m.mode != modeConfirmDelete {
+		t.Errorf("mode should still be modeConfirmDelete; got %v", m.mode)
+	}
+}
+
+// TestErrorClearedAfterExpire verifies that:
+// - errMsg sets footerErr = true
+// - matching footerExpireMsg clears footerMsg, footerErr, and m.err
+// - a subsequent yank shows a plain (non-error) footer (fixes Bug 1).
+func TestErrorClearedAfterExpire(t *testing.T) {
+	m := modelWithRows([]store.Feature{pendingFeature("1", "task")}, nil)
+
+	// Inject an error
+	fakeErr := &clipboardErr{"disk full"}
+	m, _ = update(m, errMsg{err: fakeErr})
+	tok := m.footerToken
+	if !m.footerErr {
+		t.Fatal("footerErr should be true after errMsg")
+	}
+
+	// Expire it
+	m, _ = update(m, footerExpireMsg{token: tok})
+	if m.footerErr {
+		t.Error("footerErr should be false after matching expire")
+	}
+	if m.err != nil {
+		t.Error("m.err should be nil after matching expire")
+	}
+	if m.footerMsg != "" {
+		t.Errorf("footerMsg should be empty after expire; got %q", m.footerMsg)
+	}
+
+	// Now yank — footer should be a plain (non-error) message.
+	withCopyStub(t, func(s string) error { return nil })
+	m, _ = update(m, pressKey("y"))
+	if m.footerErr {
+		t.Error("footerErr should be false for a successful yank")
+	}
+	// Rendered footer should not have styleError (we check via footerErr field).
+}
+
+// TestEscFromStickyClearsFooter verifies that pressing ESC while in sticky-add
+// edit mode clears any stale footer message (fixes Bug 3).
+func TestEscFromStickyClearsFooter(t *testing.T) {
+	m := modelWithRows(nil, nil)
+
+	// Enter sticky-add mode
+	m, _ = update(m, pressKey("a"))
+	if !m.addSticky {
+		t.Fatal("setup: addSticky should be true after a")
+	}
+
+	// Manually set a stale footer message to simulate a prior transient.
+	m.footerMsg = "stale message from before"
+
+	// Press ESC
+	m, _ = update(m, pressSpecialKey(tea.KeyEsc))
+
+	if m.footerMsg != "" {
+		t.Errorf("ESC from sticky-add should clear footerMsg; got %q", m.footerMsg)
+	}
+	if m.addSticky {
+		t.Error("ESC should clear addSticky")
+	}
+	if m.mode != modeList {
+		t.Errorf("mode should be modeList after ESC; got %v", m.mode)
+	}
+}
+
+// TestEditModeShowsHintNotStickyMsg verifies UX 1:
+// - renderFooter in edit mode shows the edit hint (contains "Tab")
+// - renderFooter does NOT contain "keep adding"
+// - renderFooter in sticky mode contains "Esc stops adding" (not two separate "Esc cancel" + "Esc stops add")
+// - renderTitleBar shows "adding" chip when addSticky is true
+func TestEditModeShowsHintNotStickyMsg(t *testing.T) {
+	m := modelWithRows(nil, nil)
+	m.width = 80
+	m.height = 24
+
+	m, _ = update(m, pressKey("a"))
+	if m.mode != modeEdit {
+		t.Fatal("setup: expected modeEdit after a")
+	}
+
+	footer := m.renderFooter()
+	if !containsSubstring(footer, "Tab") {
+		t.Errorf("edit footer should contain 'Tab'; got %q", footer)
+	}
+	if containsSubstring(footer, "keep adding") {
+		t.Errorf("edit footer should not contain 'keep adding'; got %q", footer)
+	}
+	// Sticky mode: hint should be a single unified "Esc stops adding", not the old
+	// double-Esc pattern "Esc cancel · Esc stops add".
+	if !containsSubstring(footer, "Esc stops adding") {
+		t.Errorf("sticky edit footer should contain 'Esc stops adding'; got %q", footer)
+	}
+
+	titleBar := m.renderTitleBar()
+	if !containsSubstring(titleBar, "adding") {
+		t.Errorf("title bar should contain 'adding' chip when addSticky; got %q", titleBar)
+	}
+}
+
+// TestFilterFooterHelp verifies UX 3: when a project filter is active the
+// footer short help line starts with "p clear filter".
+func TestFilterFooterHelp(t *testing.T) {
+	m := modelWithRows([]store.Feature{
+		featureWithProject("1", "task", "work"),
+	}, nil)
+	m.width = 80
+	m.height = 24
+	m.cursor = 0
+
+	// Engage filter
+	m, _ = update(m, pressKey("p"))
+	if !m.filterActive {
+		t.Fatal("setup: filterActive should be true after p")
+	}
+
+	footer := m.renderFooter()
+	if !containsSubstring(footer, "p clear filter") {
+		t.Errorf("footer should contain 'p clear filter' when filter active; got %q", footer)
+	}
+}
+
+// TestGraceCountdown verifies UX 4: initial footerMsg contains "(3s)", and
+// after receiving a graceTickMsg with ~1s elapsed the countdown decrements.
+func TestGraceCountdown(t *testing.T) {
+	m := modelWithRows([]store.Feature{pendingFeature("42", "feed cat")}, nil)
+
+	// Press t → enters grace with "(3s)" in footer
+	m, _ = update(m, pressKey("t"))
+	if m.mode != modeGraceUndo {
+		t.Fatalf("expected modeGraceUndo; got %v", m.mode)
+	}
+	if !containsSubstring(m.footerMsg, "(3s)") {
+		t.Errorf("initial footerMsg should contain '(3s)'; got %q", m.footerMsg)
+	}
+
+	// Simulate ~1 second having passed by back-dating the deadline.
+	m.graceDeadline = m.graceDeadline.Add(-1 * time.Second)
+
+	// Deliver a graceTickMsg — should update footer to "(2s)" and re-arm tick.
+	newM, cmd := update(m, graceTickMsg{id: "42"})
+	if !containsSubstring(newM.footerMsg, "(2s)") {
+		t.Errorf("after 1s tick, footerMsg should contain '(2s)'; got %q", newM.footerMsg)
+	}
+	if cmd == nil {
+		t.Error("graceTickMsg should re-arm the tick command")
+	}
+
+	// A graceTickMsg for a different ID should be a no-op.
+	noopM, noopCmd := update(m, graceTickMsg{id: "99"})
+	if noopM.footerMsg != m.footerMsg {
+		t.Errorf("mismatched ID tick should not change footerMsg; got %q", noopM.footerMsg)
+	}
+	if noopCmd != nil {
+		t.Error("mismatched ID tick should not re-arm")
+	}
+}

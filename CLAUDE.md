@@ -82,7 +82,7 @@ ID 用 8 字符 hex（`crypto/rand` 4 字节）。**为什么不用自增数字*
 ## 双文件 + 7 天滚动归档
 
 ```
-~/hoard/.tick/
+<wizard 选定的目录>/
   tasks.md       ← undone + 过去 7 天的 done — 任意时刻 < 350 行 / 35 KB
   archive.md     ← 7 天前的 done；append-only；TUI 列表不读它
 ```
@@ -101,8 +101,11 @@ mark-done / undone 是**就地操作**（仅修改 tasks.md），不跨文件移
 ## TUI today 语义
 
 - `pending = tasks.md 中所有 [ ] 行`
-- `done section = tasks.md 中 [x] 且 *date == today 的行`
-- 历史完成（archive.md）TUI 列表不读
+- `done section = tasks.md 中 [x] 且 *date == today 的行`（TodayResponse.Done）
+- `done section 续` = tasks.md 中 [x] 且 *date == yesterday 的行（TodayResponse.DoneYesterday）
+  - 两者共用同一个 "── done ──" separator，yesterday 行尾显示 dim 的 `-1d` 标记
+  - row.daysAgo: 0 = today/pending，1 = yesterday done
+- 历史完成（2-6 天前 + archive.md）TUI 列表不读
 
 ## bubbletea 状态机
 
@@ -226,8 +229,8 @@ Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或
 
 - 统计面板：30 天柱状图 + 年度热力图（`s` 切视图，stats 视图放开 40 字符宽度限制使用 terminal full width）
 - archive 按年拆分（5 年后再考虑）
-- fsnotify 自动 reload（多端同步时实时跟随外部改动）
 - `/` 搜索 / 过滤
+- 提交 `tick-obsidian` 到 Obsidian 官方插件市场（PR 到 `obsidianmd/obsidian-releases`）— 当前用户走 BRAT
 
 ## 设计决策（不要回退）
 
@@ -238,9 +241,31 @@ Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或
 5. **不做乐观更新**：所有写操作等 store 返回再 reload。本地 IO 极快。
 6. **rowDraft phantom**：按 a 在 rows 顶部插一行 phantom，不动 m.today；exitEdit 通过 buildRows 自动清理。
 7. **`a` 永远 sticky**：连续新建是默认；不再保留"加一条退出"的非 sticky 模式。
+8. **8 字符 hex 随机 ID（不是顺序整数）**：手机插件 + Mac CLI 双向同步时，两端按"max+1"会撞 ID（实际遇到过 [63] 同 ID 导致 mark-done 走错行）。32 bit hex 碰撞概率近 0；sweep 还会兜底 re-roll 重复。
+9. **dot-prefix `.tick/` 目录**：放进 Obsidian vault 时被原生文件树自动隐藏，避免用户在 Obsidian 编辑器里改 markdown 导致 ID/状态错乱。
+10. **首次启动 wizard，不强制 hard-coded 路径**：`internal/setup/wizard.go` 扫 obsidian.json 列出 vaults，让用户选 vault 或自定义路径或默认 `~/.tick/tasks.md`。Tab 切英中。配置写到 `~/.config/tick/config` 后续不再问。
+11. **fsnotify 监听 + 编辑期间延迟 reload**：`internal/watcher` 监听父目录（atomic write 换 inode），消息通过 `tea.Program.Send(FileChangedMsg{})`；如果用户正在 modeEdit/Confirm/Grace，先 `m.pendingReload=true` 等回到 modeList 再 drain，避免吞掉用户半途的输入。
+
+## 发布渠道
+
+| 仓库 | 干什么用 | 当前版本 |
+|---|---|---|
+| [`al4danim/tick-tui`](https://github.com/al4danim/tick-tui) | CLI 源代码 + GitHub Actions release | v0.3.0 |
+| [`al4danim/tick-obsidian`](https://github.com/al4danim/tick-obsidian) | Obsidian 插件源代码 | 0.2.1 |
+| [`al4danim/homebrew-tick`](https://github.com/al4danim/homebrew-tick) | Homebrew tap formula | 跟 tick-tui 同步 |
+
+发版流程：
+1. `tick-tui` 改完 → bump tag `vX.Y.Z` → push → `.github/workflows/release.yml` 跑 goreleaser → 4 平台 binary 上 GitHub Releases，formula 自动推到 `homebrew-tick`
+2. `tick-obsidian` 改完 → bump `manifest.json` + `package.json` + `versions.json` 三个版本号 → tag `X.Y.Z`（无 v 前缀，Obsidian 惯例）→ push → action 上传 `main.js` / `manifest.json` / `styles.css` 到 release
+
+GitHub Actions 推 formula 到 `homebrew-tick` 用的是 fine-grained PAT，存为 `tick-tui` 仓库的 `HOMEBREW_TAP_TOKEN` secret。PAT 必须有 `al4danim/homebrew-tick` 的 `Contents: Read and write`。**目前 PAT 状态待确认**（v0.3.0 release 时 brew 推送 403，formula 是手工推的）。
+
+用户安装：
+- CLI：`brew tap al4danim/tick && brew install tick`
+- 插件：BRAT → Add Beta Plugin → `al4danim/tick-obsidian`
 
 ## 相关仓库
 
 - `~/Sync/tick-obsidian/`     Obsidian 插件，配套客户端（直接读写同一个 tasks.md）
 - `~/Sync/feature-check/`     旧服务端 (FastAPI + SQLite)，**已废弃**，仅作迁移源
-- `~/Sync/zsh-tick/`          旧 zsh + fzf 客户端，**已废弃**
+- `~/Sync/zsh-tick/`          旧 zsh + fzf 客户端，**已废弃**（注意：曾在 `~/.zshrc` 加过 `export PATH=...zsh-tick/bin:...`，会遮蔽 brew 的 tick；安装新版后记得清理）

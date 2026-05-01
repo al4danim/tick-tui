@@ -8,6 +8,21 @@ import (
 	"github.com/al4danim/tick-tui/internal/store"
 )
 
+// footerHeight returns the number of lines renderFooter will occupy.
+// This must stay in sync with renderFooter's branch logic (fixes Bug 5).
+func (m Model) footerHeight() int {
+	if m.mode == modeEdit {
+		return 1
+	}
+	if m.footerMsg != "" {
+		return 1
+	}
+	if m.helpExpanded {
+		return strings.Count(longHelp, "\n") + 1
+	}
+	return 1
+}
+
 // View renders the full TUI screen.
 func (m Model) View() string {
 	if m.width == 0 {
@@ -34,17 +49,18 @@ func (m Model) renderTitleBar() string {
 		}
 		bar += styleBold.Render(" · " + label)
 	}
+	// UX 1: show sticky-add state in the title bar so the footer can show the
+	// edit hint instead of the "keep adding" message.
+	if m.addSticky && m.mode == modeEdit {
+		bar += styleDim.Render(" · adding")
+	}
 	return lipgloss.NewStyle().MaxWidth(m.width).Render(bar)
 }
 
 func (m Model) renderList() string {
-	// Calculate available height for list rows
-	footerLines := 1
-	if m.helpExpanded {
-		footerLines = strings.Count(longHelp, "\n") + 2
-	}
-	// 2 = title bar + blank line
-	availableRows := m.height - 2 - footerLines
+	// 2 = title bar + blank line separating title from list
+	// footerHeight() is the single source of truth for how many lines the footer uses.
+	availableRows := m.height - 2 - m.footerHeight()
 	if availableRows < 1 {
 		availableRows = 1
 	}
@@ -81,11 +97,11 @@ func (m Model) buildListLines() []string {
 			lines = append(lines, renderSeparator(m.width))
 		case rowDraft:
 			// Draft is always selected + always in edit mode.
-			lines = append(lines, m.renderFeatureLine(store.Feature{}, true, true, true))
+			lines = append(lines, m.renderFeatureLine(store.Feature{}, true, true, true, 0))
 		default:
 			selected := i == m.cursor
 			inEdit := m.mode == modeEdit && selected
-			lines = append(lines, m.renderFeatureLine(r.feature, selected, inEdit, false))
+			lines = append(lines, m.renderFeatureLine(r.feature, selected, inEdit, false, r.daysAgo))
 		}
 	}
 	return lines
@@ -95,7 +111,7 @@ func chip(label string) string {
 	return styleChip.Render("[" + label + "]")
 }
 
-func (m Model) renderFeatureLine(f store.Feature, selected, inEdit, isDraft bool) string {
+func (m Model) renderFeatureLine(f store.Feature, selected, inEdit, isDraft bool, daysAgo int) string {
 	isDone := f.IsDone == 1
 
 	checkbox := "[ ]"
@@ -138,6 +154,15 @@ func (m Model) renderFeatureLine(f store.Feature, selected, inEdit, isDraft bool
 		titlePart = f.Title
 		if f.ProjectName != nil && *f.ProjectName != "" {
 			rightPart = "@" + *f.ProjectName
+		}
+		// Append dim "-1d" marker for yesterday's done rows.
+		// We build a plain-text annotation here; the whole row is dimmed below.
+		if daysAgo > 0 {
+			if rightPart != "" {
+				rightPart = "-1d " + rightPart
+			} else {
+				rightPart = "-1d"
+			}
 		}
 		if selected && !isDone {
 			titlePart = styleSelected.Render(titlePart)
@@ -187,24 +212,44 @@ func renderSeparator(width int) string {
 }
 
 func (m Model) renderFooter() string {
-	if m.footerMsg != "" {
-		// Confirm / grace / sticky-add messages take priority over context help.
-		if m.err != nil {
-			return styleError.Render(m.footerMsg)
+	var out string
+	switch {
+	// UX 1: edit hint always takes priority so users can always see field controls.
+	case m.mode == modeEdit:
+		out = styleDim.Render(editFooterHint(m))
+	case m.footerMsg != "":
+		// Confirm, grace, or transient (copy/error) messages.
+		if m.footerErr {
+			out = styleError.Render(m.footerMsg)
+		} else {
+			out = m.footerMsg
 		}
-		return m.footerMsg
-	}
-	if m.mode == modeEdit {
-		return styleDim.Render(editFooterHint(m))
-	}
-	if m.helpExpanded {
+	case m.helpExpanded:
+		// longHelp is multi-line; skip MaxWidth so lines aren't squashed together.
 		return longHelp
+	default:
+		out = styleDim.Render(footerShortHelp(m))
 	}
-	return styleDim.Render(shortHelp)
+	// Bug 4: clamp to terminal width to prevent wrapping that shifts list rows.
+	return lipgloss.NewStyle().MaxWidth(m.width).Render(out)
 }
 
 // editFooterHint returns the context help shown while editing.
+// In sticky-add mode Esc both cancels the current edit and exits sticky, so
+// the hint replaces the per-field "Esc cancel" with a single "Esc stops adding".
 func editFooterHint(m Model) string {
+	if m.addSticky {
+		switch m.field {
+		case fieldTitle:
+			return "Tab → project · Enter save · Esc stops adding"
+		case fieldProject:
+			return "Tab → title · Enter save · Esc stops adding"
+		case fieldDate:
+			return "↑/↓ ±1 day · Enter save · Esc stops adding"
+		default:
+			return "Enter save · Esc stops adding"
+		}
+	}
 	switch m.field {
 	case fieldTitle:
 		return "Tab → project · Enter save · Esc cancel"
@@ -212,8 +257,9 @@ func editFooterHint(m Model) string {
 		return "Tab → title · Enter save · Esc cancel"
 	case fieldDate:
 		return "↑/↓ ±1 day · Enter save · Esc cancel"
+	default:
+		return "Enter save · Esc cancel"
 	}
-	return "Enter save · Esc cancel"
 }
 
 // scrollWindow returns [start, end) indices such that cursor stays visible.

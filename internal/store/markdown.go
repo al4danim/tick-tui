@@ -323,31 +323,37 @@ func joinLines(lines []string) []byte {
 
 // ----- Store interface methods ---------------------------------------------
 
-// GetToday returns pending features and today's completions.
+// GetToday returns pending features, today's completions, and yesterday's completions.
 func (s *Store) GetToday() (*TodayResponse, error) {
 	pending := []Feature{}
 	doneToday := []Feature{}
+	doneYesterday := []Feature{}
 
 	all, err := s.loadTasks()
 	if err != nil {
 		return nil, err
 	}
-	today := time.Now().Format("2006-01-02")
+	now := time.Now()
+	todayStr := now.Format("2006-01-02")
+	yesterdayStr := now.AddDate(0, 0, -1).Format("2006-01-02")
 	for _, f := range all {
 		if f.IsDone == 1 {
-			if f.CompletedAt != nil && *f.CompletedAt == today {
+			if f.CompletedAt != nil && *f.CompletedAt == todayStr {
 				doneToday = append(doneToday, f)
+			} else if f.CompletedAt != nil && *f.CompletedAt == yesterdayStr {
+				doneYesterday = append(doneYesterday, f)
 			}
-			// Older done (1-6 days back) live in tasks.md too but TUI doesn't show them.
+			// Older done (2-6 days back) live in tasks.md too but TUI doesn't show them.
 			continue
 		}
 		pending = append(pending, f)
 	}
 	return &TodayResponse{
-		Pending:    pending,
-		Done:       doneToday,
-		DoneToday:  len(doneToday),
-		TotalToday: len(pending) + len(doneToday),
+		Pending:       pending,
+		Done:          doneToday,
+		DoneYesterday: doneYesterday,
+		DoneToday:     len(doneToday),
+		TotalToday:    len(pending) + len(doneToday),
 	}, nil
 }
 

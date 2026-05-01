@@ -14,10 +14,11 @@ type Feature struct {
 
 // TodayResponse is what the TUI asks for on every refresh.
 type TodayResponse struct {
-	Pending    []Feature
-	Done       []Feature // only today's completions
-	DoneToday  int
-	TotalToday int
+	Pending       []Feature
+	Done          []Feature // only today's completions
+	DoneYesterday []Feature // yesterday's completions (shown below today's done section)
+	DoneToday     int
+	TotalToday    int
 }
 
 // ProjectItem is one project name (for ghost-text autocomplete).

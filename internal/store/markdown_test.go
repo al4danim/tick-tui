@@ -411,6 +411,45 @@ func TestStore_LoadTasks_ResolvesDuplicateIDs(t *testing.T) {
 	}
 }
 
+func TestStore_GetToday_ReturnsYesterdayDone(t *testing.T) {
+	today := time.Now().Format("2006-01-02")
+	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	twoDaysAgo := time.Now().AddDate(0, 0, -2).Format("2006-01-02")
+
+	content := "- [ ] pending task +" + today + " [1]\n" +
+		"- [x] done today @work +" + today + " *" + today + " [2]\n" +
+		"- [x] done yesterday @work +" + yesterday + " *" + yesterday + " [3]\n" +
+		"- [x] done two days ago @home +" + twoDaysAgo + " *" + twoDaysAgo + " [4]\n"
+
+	s := tempStore(t, content)
+
+	resp, err := s.GetToday()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(resp.Pending) != 1 || resp.Pending[0].ID != "1" {
+		t.Errorf("Pending: %+v", resp.Pending)
+	}
+	if len(resp.Done) != 1 || resp.Done[0].ID != "2" {
+		t.Errorf("Done (today): %+v", resp.Done)
+	}
+	if len(resp.DoneYesterday) != 1 || resp.DoneYesterday[0].ID != "3" {
+		t.Errorf("DoneYesterday: %+v", resp.DoneYesterday)
+	}
+	// Two-days-ago task: not in Done or DoneYesterday (but stays in tasks.md until 7d cutoff)
+	for _, f := range resp.Done {
+		if f.ID == "4" {
+			t.Error("two-days-ago done should not appear in Done")
+		}
+	}
+	for _, f := range resp.DoneYesterday {
+		if f.ID == "4" {
+			t.Error("two-days-ago done should not appear in DoneYesterday")
+		}
+	}
+}
+
 func TestStore_GetProjects(t *testing.T) {
 	today := time.Now().Format("2006-01-02")
 	s := tempStore(t, "- [ ] a @work +"+today+" [1]\n"+

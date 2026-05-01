@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/al4danim/tick-tui/internal/store"
 )
+
+func itoa(i int) string { return strconv.Itoa(i) }
 
 // copyToClipboard is the clipboard write hook. Tests replace it with a stub.
 var copyToClipboard = clipboard.WriteAll
@@ -23,7 +26,8 @@ type featureMarkedDoneMsg struct{ feature *store.Feature }
 type featureUntickedMsg struct{ feature *store.Feature }
 type featureDeletedMsg struct{ id string }
 type graceExpiredMsg struct{ id string }
-type footerExpireMsg struct{}
+type footerExpireMsg struct{ token int }
+type graceTickMsg struct{ id string }
 type errMsg struct{ err error }
 
 // FileChangedMsg fires when the watcher sees an external modification to
@@ -136,9 +140,23 @@ func cmdGraceTimer(id string) tea.Cmd {
 	})
 }
 
-func cmdFooterTimer() tea.Cmd {
+func cmdGraceTick(id string) tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return graceTickMsg{id}
+	})
+}
+
+// setTransientFooter sets a non-error footer message and schedules its
+// automatic removal in 3s. The token mechanism ensures that a later
+// confirm/grace prompt (which uses a different path without a timer) will
+// NOT be cleared by a stale expire message from an earlier transient.
+func (m *Model) setTransientFooter(s string) tea.Cmd {
+	m.footerToken++
+	m.footerMsg = s
+	m.footerErr = false
+	tok := m.footerToken
 	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
-		return footerExpireMsg{}
+		return footerExpireMsg{token: tok}
 	})
 }
 
@@ -195,7 +213,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case footerExpireMsg:
-		m.footerMsg = ""
+		// Only clear when the token matches; stale timers from superseded
+		// transient messages are silently discarded (fixes Bug 2).
+		if msg.token == m.footerToken {
+			m.footerMsg = ""
+			m.footerErr = false
+			m.err = nil // fixes Bug 1: m.err was never cleared
+		}
+		return m, nil
+
+	case graceTickMsg:
+		if m.mode == modeGraceUndo && m.graceID == msg.id {
+			remaining := time.Until(m.graceDeadline)
+			if remaining > 0 {
+				secs := int(remaining.Seconds()) + 1 // ceiling
+				if secs > 3 {
+					secs = 3
+				}
+				m.footerMsg = "marked done · u to undo (" + itoa(secs) + "s)"
+				return m, cmdGraceTick(msg.id)
+			}
+			// Remaining ≤ 0: clear footer immediately to eliminate a 1-2 frame
+			// cosmetic delay before graceExpiredMsg arrives. We deliberately
+			// leave mode/graceID alone — graceExpiredMsg owns that transition.
+			// Brief window where footer hides but `u` still works is intentional.
+			m.footerMsg = ""
+		}
 		return m, nil
 
 	case FileChangedMsg:
@@ -210,10 +253,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.err = msg.err
-		m.footerMsg = "error: " + msg.err.Error()
 		// On any error, drop sticky-add so we don't auto-reopen edit on the next reload.
 		m.addSticky = false
-		return m, cmdFooterTimer()
+		// setTransientFooter resets footerErr=false, so set it true afterward.
+		cmd := m.setTransientFooter("error: " + msg.err.Error())
+		m.footerErr = true
+		return m, cmd
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -302,8 +347,9 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Add):
 		// `a` always streams: save → open next draft. ESC or empty submit ends.
+		// The "adding" status is conveyed through the title bar chip and the
+		// edit footer hint (UX 1), not a transient footer message.
 		m.addSticky = true
-		m.footerMsg = "+ keep adding · Esc to stop"
 		return m.enterEditNew()
 
 	case key.Matches(msg, keys.Edit):
@@ -360,11 +406,13 @@ func (m Model) handleYank() (Model, tea.Cmd) {
 		return m, nil
 	}
 	if err := copyToClipboard(f.Title); err != nil {
-		m.footerMsg = "copy failed: " + err.Error()
-		return m, cmdFooterTimer()
+		// setTransientFooter resets footerErr=false, so set it true afterward.
+		cmd := m.setTransientFooter("copy failed: " + err.Error())
+		m.footerErr = true
+		return m, cmd
 	}
-	m.footerMsg = `copied "` + f.Title + `"`
-	return m, cmdFooterTimer()
+	cmd := m.setTransientFooter(`copied "` + f.Title + `"`)
+	return m, cmd
 }
 
 // drainPendingReload returns a reload cmd if a watcher event arrived while we
@@ -428,6 +476,8 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keys.Escape):
 		m.addSticky = false
+		m.footerMsg = ""       // Bug 3: clear any stale sticky-add footer message
+		m.footerToken++        // invalidate any pending transient timer
 		return m.exitEdit(false)
 
 	case key.Matches(msg, keys.Enter):
@@ -436,7 +486,8 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// enough to mean "save" — without a title there is nothing to save.
 		if m.editingID == "" && strings.TrimSpace(m.titleInput.Value()) == "" {
 			m.addSticky = false
-			m.footerMsg = ""
+			m.footerMsg = ""   // Bug 3: clear stale footer on empty-Enter exit
+			m.footerToken++    // invalidate any pending transient timer
 			return m.exitEdit(false)
 		}
 		return m.exitEdit(true)
@@ -614,8 +665,13 @@ func (m Model) handleMarkDone() (Model, tea.Cmd) {
 	id := f.ID
 	m.mode = modeGraceUndo
 	m.graceID = id
-	m.footerMsg = "marked done · u to undo"
-	return m, tea.Batch(m.cmdMarkDone(id), cmdGraceTimer(id))
+	m.err = nil // clear any stale error so prompt isn't tinted red
+	m.footerErr = false
+	m.graceDeadline = time.Now().Add(3 * time.Second)
+	m.footerMsg = "marked done · u to undo (3s)"
+	// Increment token so any pending transient timer won't clear this prompt.
+	m.footerToken++
+	return m, tea.Batch(m.cmdMarkDone(id), cmdGraceTimer(id), cmdGraceTick(id))
 }
 
 func (m Model) handleUntick() (Model, tea.Cmd) {
@@ -625,6 +681,10 @@ func (m Model) handleUntick() (Model, tea.Cmd) {
 	}
 	m.mode = modeConfirmUntick
 	m.pendingID = f.ID
+	m.err = nil // clear stale error so prompt is not red
+	m.footerErr = false
+	// Increment token so any pending transient timer won't clear this prompt.
+	m.footerToken++
 	title := f.Title
 	m.footerMsg = `un-tick "` + title + `"? y/n`
 	return m, nil
@@ -637,6 +697,10 @@ func (m Model) handleDeletePrompt() (Model, tea.Cmd) {
 	}
 	m.mode = modeConfirmDelete
 	m.pendingID = f.ID
+	m.err = nil // clear stale error so prompt is not red
+	m.footerErr = false
+	// Increment token so any pending transient timer won't clear this prompt.
+	m.footerToken++
 	title := f.Title
 	m.footerMsg = `delete "` + title + `"? y/n`
 	return m, nil

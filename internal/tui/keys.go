@@ -52,6 +52,16 @@ var keys = keyMap{
 
 const shortHelp = "a add · t done · e edit · p filter · y copy · D del · ? help · q quit"
 
+// footerShortHelp returns the one-line help string shown at the bottom of the
+// list in normal mode. When a project filter is active it surfaces the "p clear
+// filter" action prominently so the user knows how to get back to all tasks.
+func footerShortHelp(m Model) string {
+	if m.filterActive {
+		return "p clear filter · a add · t done · e edit · y copy · D del · ? help"
+	}
+	return shortHelp
+}
+
 const longHelp = `Navigation:  j/k or ↑/↓ move (Nj/Nk repeats N times, e.g. 5j)
              ] / [ jump next/prev project
              g first · G last (within current section: pending or done)
