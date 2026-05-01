@@ -43,17 +43,17 @@ go install github.com/al4danim/tick-tui/cmd/tick@latest
 ## Usage
 
 ```sh
-tick                         # opens the TUI on ~/.tick/tasks.md by default
+tick                         # first run shows a setup wizard
 tick --version
 ```
 
-Configuration: `~/.config/tick/config`
+On first launch a wizard offers to put `tasks.md` inside an Obsidian vault (auto-detected) or at the default `~/.tick/tasks.md`. The choice is saved to `~/.config/tick/config`:
 
 ```
-TICK_TASKS_FILE=~/hoard/.tick/tasks.md
+TICK_TASKS_FILE=/path/you/picked/.tick/tasks.md
 ```
 
-`archive.md` is auto-created in the same directory.
+`archive.md` is auto-created in the same directory. Edit the config file directly to relocate later.
 
 ## File format
 
@@ -78,7 +78,7 @@ One task per line, position-insensitive when parsed:
 ## Why two files
 
 ```
-~/hoard/.tick/
+<your-tasks-dir>/
   tasks.md    ← undone + last 7 days of done — always small (< 50 KB)
   archive.md  ← older done rows; append-only
 ```

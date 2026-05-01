@@ -5,8 +5,10 @@
 `tick-tui` 是 Tick 任务管理系统的命令行 TUI 客户端，基于 Go + bubbletea。
 设计理念是 lazygit 风格的窄窗口（约 40 字符宽），全程同一画面，没有任何弹框 / modal / popup —— 所有编辑就地内联。
 
-数据直接读写本地 markdown 文件（默认 `~/hoard/.tick/tasks.md` + `archive.md`），**不再依赖任何服务端**。
-文件放在 Obsidian vault 里，手机端在 Obsidian 里手敲新任务即可，tick-tui 启动时自动补全 metadata。
+数据直接读写本地 markdown 文件（路径由首次启动 wizard 决定，默认 fallback `~/.tick/tasks.md`），**不再依赖任何服务端**。
+推荐放在 Obsidian vault 里，手机端在 Obsidian 里手敲新任务即可，tick-tui 启动时自动补全 metadata。
+
+我（开发者）个人的实际路径是 `~/hoard/.tick/tasks.md`（hoard = 我的 Obsidian vault），仅作为本文档中举例参考；新用户的路径由 wizard 选定。
 
 ## 架构
 
@@ -17,8 +19,14 @@ internal/store/
   markdown.go              parser / serializer / 文件 IO / Store 接口实现
   markdown_test.go         单测
 internal/config/
-  config.go                读 ~/.config/tick/config（key=value，行内 ` #` 注释）
+  config.go                读 / 写 ~/.config/tick/config（key=value，行内 ` #` 注释）
   config_test.go
+internal/setup/
+  detect.go                Obsidian vault 检测（读 obsidian.json）
+  detect_test.go
+  strings.go               i18n EN/ZH strings 表
+  wizard.go                首次启动 wizard 的 bubbletea 子 model
+  wizard_test.go
 internal/tui/
   model.go                 Model + 状态机常量 + buildRows + 项目分组排序
   update.go                Update：消息分发、store tea.Cmd、按键 handler
@@ -27,7 +35,8 @@ internal/tui/
   styles.go                lipgloss 样式集中
   keys.go                  bubbles/key 绑定 + shortHelp / longHelp
   update_test.go           关键状态机单测
-scripts/migrate.py         一次性 SQLite → markdown 迁移脚本
+internal/watcher/
+  watcher.go               fsnotify-based tasks.md 监听
 ```
 
 依赖：`charmbracelet/bubbletea` v1.3 · `bubbles` v1.0 · `lipgloss` v1.1 · `atotto/clipboard`。
@@ -196,30 +205,22 @@ done 区不分组。
 go test ./...                  # 全部测试
 make build                     # bin/tick
 make install                   # cp 到 ~/.local/bin/tick
-./bin/tick                     # 运行（直接读 ~/hoard/.tick/tasks.md）
+./bin/tick                     # 运行（首次启动 wizard 选路径）
 ```
 
 `go env -w GOPROXY=https://goproxy.cn,direct` 走中国镜像。
 
 ## 配置
 
-`~/.config/tick/config`（mode 0600）：
+首次启动 wizard 自动写 `~/.config/tick/config`（mode 0600）：
 
 ```
-TICK_TASKS_FILE=~/hoard/.tick/tasks.md
+TICK_TASKS_FILE=<wizard 选定的绝对路径>
 ```
 
-行内注释 ` #`（空格 + 井号）会被截断。空值或字段缺失时 fallback 到默认 `~/hoard/.tick/tasks.md`。`archive.md` 自动放在同一目录。
+行内注释 ` #`（空格 + 井号）会被截断。空值或字段缺失时 fallback 到默认 `~/.tick/tasks.md`。`archive.md` 自动放在同一目录。
 
-## 一次性迁移（SQLite → markdown）
-
-老服务端（feature-check）的 SQLite：
-
-```bash
-python3 scripts/migrate.py --out ~/hoard/.tick
-```
-
-读 `~/Library/Application Support/Tick/data.db`，写 tasks.md + archive.md。完成后服务端 / pywebview 可关停。
+Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或 `~/.config/obsidian/obsidian.json`（Linux）列出已注册的 vault；用户选 vault 后路径自动拼成 `<vault>/.tick/tasks.md`。Tab 切英中。
 
 ## 后续待做（v2）
 

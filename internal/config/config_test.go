@@ -35,8 +35,8 @@ func TestLoad_emptyValueFallsBackToDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if !strings.HasSuffix(cfg.TasksFile, "/hoard/.tick/tasks.md") {
-		t.Errorf("TasksFile should fall back to default ~/hoard/.tick/tasks.md, got %q", cfg.TasksFile)
+	if !strings.HasSuffix(cfg.TasksFile, "/.tick/tasks.md") {
+		t.Errorf("TasksFile should fall back to default ~/.tick/tasks.md, got %q", cfg.TasksFile)
 	}
 }
 
@@ -106,5 +106,47 @@ func TestCreateTemplate_fileMode(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("file mode: got %04o want 0600", perm)
+	}
+}
+
+func TestExists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	if Exists(path) {
+		t.Error("expected !Exists for missing file")
+	}
+	if err := os.WriteFile(path, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !Exists(path) {
+		t.Error("expected Exists for present file")
+	}
+}
+
+func TestWrite_createsFileWithCorrectMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "subdir", "config")
+	if err := Write(path, "/abs/path/tasks.md"); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("file mode: got %04o want 0600", perm)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "TICK_TASKS_FILE=/abs/path/tasks.md") {
+		t.Errorf("body should contain TICK_TASKS_FILE=...; got: %q", data)
+	}
+
+	// And Load should read what we wrote.
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TasksFile != "/abs/path/tasks.md" {
+		t.Errorf("loaded TasksFile: got %q", cfg.TasksFile)
 	}
 }

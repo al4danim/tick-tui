@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/al4danim/tick-tui/internal/config"
+	"github.com/al4danim/tick-tui/internal/setup"
 	"github.com/al4danim/tick-tui/internal/store"
 	"github.com/al4danim/tick-tui/internal/tui"
 	"github.com/al4danim/tick-tui/internal/watcher"
@@ -27,6 +28,14 @@ func main() {
 	}
 
 	cfgPath := config.DefaultPath()
+
+	if !config.Exists(cfgPath) {
+		if err := runSetup(cfgPath); err != nil {
+			fmt.Fprintf(os.Stderr, "tick: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tick: %v\n", err)
@@ -61,4 +70,25 @@ func main() {
 		fmt.Fprintf(os.Stderr, "tick: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runSetup launches the first-run wizard, persists the user's choice to
+// cfgPath, and returns. If the user quits without choosing (Ctrl+C) we
+// abort startup — there's nothing useful to do without a tasks file.
+func runSetup(cfgPath string) error {
+	vaults := setup.DetectObsidianVaults()
+	m := setup.NewModel(setup.LangEN, vaults)
+
+	final, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	if err != nil {
+		return fmt.Errorf("setup: %w", err)
+	}
+	chosen := final.(setup.Model).Chosen()
+	if chosen == "" {
+		return fmt.Errorf("setup cancelled")
+	}
+	if err := config.Write(cfgPath, chosen); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return nil
 }
