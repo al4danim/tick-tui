@@ -637,3 +637,17 @@ func padOrTruncToWidth(label string, width int) string {
 	}
 	return b.String()
 }
+
+// computeStreak counts consecutive done-days from today backwards, stopping at
+// the first day with zero completions. Capped at 30 (callers display "30+").
+func computeStreak(data map[string]int, today time.Time) int {
+	streak := 0
+	for i := 0; i < 30; i++ {
+		key := today.AddDate(0, 0, -i).Format("2006-01-02")
+		if data[key] == 0 {
+			return streak
+		}
+		streak++
+	}
+	return streak
+}
