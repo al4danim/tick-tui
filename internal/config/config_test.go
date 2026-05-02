@@ -150,3 +150,89 @@ func TestWrite_createsFileWithCorrectMode(t *testing.T) {
 		t.Errorf("loaded TasksFile: got %q", cfg.TasksFile)
 	}
 }
+
+func TestWriteFull_persistsLang(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	if err := WriteFull(path, "/p/tasks.md", "zh"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Lang != "zh" {
+		t.Errorf("Lang: got %q want %q", cfg.Lang, "zh")
+	}
+	if cfg.TasksFile != "/p/tasks.md" {
+		t.Errorf("TasksFile: got %q", cfg.TasksFile)
+	}
+}
+
+func TestWrite_BackwardCompat_DefaultsLangToEN(t *testing.T) {
+	// The 2-arg Write must continue to work and produce a config with lang=en.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	if err := Write(path, "/p/tasks.md"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Lang != "en" {
+		t.Errorf("Lang default: got %q want %q", cfg.Lang, "en")
+	}
+}
+
+func TestSetLang_PreservesTasksFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	if err := WriteFull(path, "/orig/tasks.md", "en"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetLang(path, "zh"); err != nil {
+		t.Fatalf("SetLang: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Lang != "zh" {
+		t.Errorf("Lang after SetLang: got %q want %q", cfg.Lang, "zh")
+	}
+	if cfg.TasksFile != "/orig/tasks.md" {
+		t.Errorf("TasksFile should be preserved across SetLang; got %q", cfg.TasksFile)
+	}
+}
+
+func TestLoad_emptyLangFallsBackToEN(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	if err := os.WriteFile(path, []byte("TICK_TASKS_FILE=/x/tasks.md\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Lang != "en" {
+		t.Errorf("Lang default when missing: got %q want %q", cfg.Lang, "en")
+	}
+}
+
+func TestLoad_explicitZhLang(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	content := "TICK_TASKS_FILE=/x/tasks.md\nTICK_LANG=zh\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Lang != "zh" {
+		t.Errorf("Lang: got %q want %q", cfg.Lang, "zh")
+	}
+}

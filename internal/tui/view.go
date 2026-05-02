@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -18,7 +17,7 @@ func (m Model) footerHeight() int {
 		return 1
 	}
 	if m.helpExpanded {
-		return strings.Count(longHelp, "\n") + 1
+		return strings.Count(m.strings.LongHelp(), "\n") + 1
 	}
 	return 1
 }
@@ -27,6 +26,39 @@ func (m Model) footerHeight() int {
 func (m Model) View() string {
 	if m.width == 0 {
 		return ""
+	}
+
+	switch m.mode {
+	case modeStats30:
+		data := m.statsData
+		if data == nil {
+			data = map[string]int{}
+		}
+		// Use m.statsEnd (captured at entry) rather than timeNow() so the
+		// X-axis "today" label stays in sync with the loaded data window even
+		// if the session crosses midnight. Defensive fallback to timeNow()
+		// if statsEnd was never set (test fixtures, etc.).
+		end := m.statsEnd
+		if end.IsZero() {
+			end = timeNow()
+		}
+		windowEnd := m.statsWindowEnd
+		if windowEnd.IsZero() {
+			windowEnd = end
+		}
+		return renderBars30(data, windowEnd, m.width, m.streak, m.selectedDate, m.selectedTasks, m.selectedScroll, m.footerMsg, m.strings)
+	case modeStatsYear:
+		data := m.statsData
+		if data == nil {
+			data = map[string]int{}
+		}
+		end := m.statsEnd
+		if end.IsZero() {
+			end = timeNow()
+		}
+		return renderHeatYear(data, end, m.width, m.strings)
+	case modeSettings:
+		return m.settingsModel.View()
 	}
 
 	var sb strings.Builder
@@ -40,19 +72,19 @@ func (m Model) View() string {
 
 func (m Model) renderTitleBar() string {
 	left := styleTitleBar.Render("Tick")
-	right := styleDim.Render(fmt.Sprintf(" · %d/%d done", m.today.DoneToday, m.today.TotalToday))
+	right := styleDim.Render(m.strings.DoneCount(m.today.DoneToday, m.today.TotalToday))
 	bar := left + right
 	if m.filterActive {
 		label := "@" + m.activeProject
 		if m.activeProject == "" {
-			label = "(no project)"
+			label = m.strings.NoProjectLabel
 		}
 		bar += styleBold.Render(" · " + label)
 	}
 	// UX 1: show sticky-add state in the title bar so the footer can show the
 	// edit hint instead of the "keep adding" message.
 	if m.addSticky && m.mode == modeEdit {
-		bar += styleDim.Render(" · adding")
+		bar += styleDim.Render(m.strings.AddingChip)
 	}
 	return lipgloss.NewStyle().MaxWidth(m.width).Render(bar)
 }
@@ -66,11 +98,11 @@ func (m Model) renderList() string {
 	}
 
 	if m.loading {
-		return styleDim.Render("loading…")
+		return styleDim.Render(m.strings.Loading)
 	}
 
 	if len(m.rows) == 0 {
-		return styleGray.Render("no tasks for today · press a to add")
+		return styleGray.Render(m.strings.NoTasksHint)
 	}
 
 	lines := m.buildListLines()
@@ -94,7 +126,7 @@ func (m Model) buildListLines() []string {
 	for i, r := range m.rows {
 		switch r.kind {
 		case rowSeparator:
-			lines = append(lines, renderSeparator(m.width))
+			lines = append(lines, renderSeparator(m.width, m.strings.DoneSeparator))
 		case rowDraft:
 			// Draft is always selected + always in edit mode.
 			lines = append(lines, m.renderFeatureLine(store.Feature{}, true, true, true, 0))
@@ -136,19 +168,19 @@ func (m Model) renderFeatureLine(f store.Feature, selected, inEdit, isDraft bool
 			// Show the current project alongside the field label so the user can
 			// see what will be submitted without Tab-ing into the project field.
 			if proj := strings.TrimSpace(m.projectInput.Value()); proj != "" {
-				rightPart = chip("title → @" + proj)
+				rightPart = chip(m.strings.ChipTitleArrow(proj))
 			} else {
-				rightPart = chip("title")
+				rightPart = chip(m.strings.ChipTitle)
 			}
 		case fieldProject:
 			titlePart = m.titleInput.Value()
 			if titlePart == "" {
-				titlePart = styleDim.Render("(title)")
+				titlePart = styleDim.Render(m.strings.ChipTitlePlaceholder)
 			}
-			rightPart = renderProjectField(m.projectInput.Value(), m.projects, true) + " " + chip("proj")
+			rightPart = renderProjectField(m.projectInput.Value(), m.projects, true) + " " + chip(m.strings.ChipProject)
 		case fieldDate:
 			titlePart = f.Title
-			rightPart = m.editDate.Format("2006-01-02") + " " + chip("date")
+			rightPart = m.editDate.Format("2006-01-02") + " " + chip(m.strings.ChipDate)
 		}
 	} else {
 		titlePart = f.Title
@@ -195,8 +227,10 @@ func padBetween(left, right string, width int) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
-func renderSeparator(width int) string {
-	label := " done "
+func renderSeparator(width int, label string) string {
+	if label == "" {
+		label = " done "
+	}
 	labelWidth := lipgloss.Width(label)
 	// When the terminal is too narrow to fit label + at least one dash on each
 	// side, just render the label alone to avoid strings.Repeat with negative n.
@@ -226,7 +260,7 @@ func (m Model) renderFooter() string {
 		}
 	case m.helpExpanded:
 		// longHelp is multi-line; skip MaxWidth so lines aren't squashed together.
-		return longHelp
+		return m.strings.LongHelp()
 	default:
 		out = styleDim.Render(footerShortHelp(m))
 	}
@@ -241,24 +275,24 @@ func editFooterHint(m Model) string {
 	if m.addSticky {
 		switch m.field {
 		case fieldTitle:
-			return "Tab → project · Enter save · Esc stops adding"
+			return m.strings.EditStickyTabProject
 		case fieldProject:
-			return "Tab → title · Enter save · Esc stops adding"
+			return m.strings.EditStickyTabTitle
 		case fieldDate:
-			return "↑/↓ ±1 day · Enter save · Esc stops adding"
+			return m.strings.EditStickyDateField
 		default:
-			return "Enter save · Esc stops adding"
+			return m.strings.EditStickyFallback
 		}
 	}
 	switch m.field {
 	case fieldTitle:
-		return "Tab → project · Enter save · Esc cancel"
+		return m.strings.EditTabToProject
 	case fieldProject:
-		return "Tab → title · Enter save · Esc cancel"
+		return m.strings.EditTabToTitle
 	case fieldDate:
-		return "↑/↓ ±1 day · Enter save · Esc cancel"
+		return m.strings.EditDateField
 	default:
-		return "Enter save · Esc cancel"
+		return m.strings.EditFallback
 	}
 }
 

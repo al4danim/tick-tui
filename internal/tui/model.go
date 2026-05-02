@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/al4danim/tick-tui/internal/i18n"
+	"github.com/al4danim/tick-tui/internal/setup"
 	"github.com/al4danim/tick-tui/internal/store"
 )
 
@@ -18,6 +20,10 @@ type APIClient interface {
 	MarkDone(id string) (*store.Feature, error)
 	Undone(id string) (*store.Feature, error)
 	Delete(id string) error
+	GetCompletionsByDate(start, end time.Time) (map[string]int, error)
+	GetTasksOnDate(d time.Time) ([]store.Feature, error)
+	OldestCompletionDate() (time.Time, error)
+	ComputeStreak(today time.Time) (int, error)
 }
 
 // mode represents which state the TUI is in.
@@ -29,6 +35,9 @@ const (
 	modeConfirmUntick      // U pressed, waiting y/n
 	modeConfirmDelete      // D pressed, waiting y/n
 	modeGraceUndo          // t pressed, 3s grace period for u
+	modeStats30            // s: 30-day bar chart
+	modeStatsYear          // S: year heatmap
+	modeSettings           // O: change tasks folder via wizard sub-model
 )
 
 // editField tracks which field is active in edit mode.
@@ -88,10 +97,41 @@ type Model struct {
 	filterActive bool   // "p" toggle: when true, only rows matching activeProject are shown
 	activeProject string // project name to filter by (empty string == "no project" group)
 	pendingReload bool  // a watcher event arrived while the user was mid-flow; reload when we land back in modeList
+	// Stats fields
+	statsData    map[string]int // completion counts loaded by cmdLoadStats
+	statsLoading bool           // true while cmdLoadStats is in-flight
+	statsErr     error          // non-nil if the last stats load failed
+	statsEnd     time.Time      // "today" snapshot captured when stats view was entered;
+	//                              View() renders against this so labels don't drift past midnight
+	//                              while the underlying statsData is still the older window.
+
+	// Stats drill-down state — active only when in modeStats30 with selectedDate non-zero.
+	selectedDate   time.Time      // zero = idle (no drill-down); non-zero = drill-down active
+	selectedTasks  []store.Feature // tasks completed on selectedDate
+	selectedScroll int            // scroll offset into selectedTasks (0-based)
+	// statsWindowEnd is the right edge of the visible bars window.
+	// Starts equal to statsEnd; shifts left when user scrolls past 30 days.
+	statsWindowEnd time.Time
+	streak         int       // consecutive done-day streak from today backwards (max 30+)
+	oldestDataDate time.Time // earliest CompletedAt across tasks/archive; zero = unknown / no data
+	// Settings fields
+	settingsModel   setup.Model  // wizard sub-model for O (change folder)
+	settingsChosen  string       // path selected by settingsModel; "" until confirmed
+	configUpdated   bool         // true after a successful config.Write in settings
+	// i18n
+	lang     i18n.Lang
+	strings  i18n.TUIStrings
+	configPath string // for persisting language toggle; empty == skip persistence (tests)
 }
 
-// NewModel builds an initial Model ready for Init.
-func NewModel(client APIClient) Model {
+// timeNow is swappable in tests to pin the clock.
+var timeNow = time.Now
+
+// NewModel builds an initial Model ready for Init. lang controls the TUI
+// language; pass i18n.LangEN if not yet known. configPath is the absolute
+// path used by the `l` toggle to persist language preference; pass "" to
+// skip persistence (tests).
+func NewModel(client APIClient, lang i18n.Lang, configPath string) Model {
 	ti := textinput.New()
 	ti.Placeholder = "task title  @project"
 	ti.CharLimit = 200
@@ -108,6 +148,9 @@ func NewModel(client APIClient) Model {
 		width:        80,
 		height:       24,
 		loading:      true,
+		lang:         lang,
+		strings:      i18n.For(lang),
+		configPath:   configPath,
 	}
 }
 

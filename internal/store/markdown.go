@@ -262,11 +262,17 @@ func (s *Store) loadTasksLocked() ([]Feature, error) {
 }
 
 // loadArchive reads archive.md without any sweep.
+// A missing archive file is treated as empty: stats / drill-down paths must
+// stay green even if the user (or a sync conflict) deletes archive.md between
+// store.New() and this read.
 func (s *Store) loadArchive() ([]Feature, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	raw, err := os.ReadFile(s.archivePath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	var out []Feature

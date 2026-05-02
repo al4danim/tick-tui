@@ -1,4 +1,4 @@
-.PHONY: build install test clean run
+.PHONY: build install test clean run seed
 
 BINARY    := bin/tick
 INSTALL_DIR := $(HOME)/.local/bin
@@ -19,3 +19,6 @@ clean:
 
 run: build
 	$(BINARY)
+
+seed:
+	go run ./cmd/seed --days 365 --avg 5 --out /tmp/tick-demo

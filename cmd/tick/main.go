@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/al4danim/tick-tui/internal/config"
+	"github.com/al4danim/tick-tui/internal/i18n"
 	"github.com/al4danim/tick-tui/internal/setup"
 	"github.com/al4danim/tick-tui/internal/store"
 	"github.com/al4danim/tick-tui/internal/tui"
@@ -42,13 +43,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	s, err := store.New(cfg.TasksFile)
+	tasksFile := cfg.TasksFile
+	if env := os.Getenv("TICK_TASKS_FILE"); env != "" {
+		tasksFile = env
+	}
+
+	s, err := store.New(tasksFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tick: open store: %v\n", err)
 		os.Exit(1)
 	}
 
-	model := tui.NewModel(s)
+	lang := i18n.ParseLang(cfg.Lang)
+	model := tui.NewModel(s, lang, cfgPath)
 
 	p := tea.NewProgram(
 		model,
@@ -56,7 +63,7 @@ func main() {
 		tea.WithMouseCellMotion(),
 	)
 
-	stop, werr := watcher.Watch(cfg.TasksFile, func() {
+	stop, werr := watcher.Watch(tasksFile, func() {
 		p.Send(tui.FileChangedMsg{})
 	})
 	if werr == nil {

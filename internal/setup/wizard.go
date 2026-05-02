@@ -33,8 +33,20 @@ const (
 	modeCustom
 )
 
-// Model is the wizard's bubbletea state. Run it as a tea.Program; when it
-// quits, call Chosen() to retrieve the selected absolute path.
+// INVARIANT: every code path that returns tea.Quit MUST also set
+// either m.chosen != "" (success) or m.quitRequested = true (cancellation)
+// before returning. The parent TUI's handleSettingsKey relies on these
+// signals to distinguish "wizard finished, do something" from
+// "wizard wants to kill the host app". Violating this invariant will
+// cause settings-mode ctrl+c / esc to terminate the entire tick app.
+//
+// See TestWizard_QuitInvariant which enforces this invariant via black-box
+// testing of all known input paths.
+//
+// Language toggle: in modePick l flips EN↔ZH (consistent with the main TUI's
+// l binding). Tab no longer toggles language. In modeCustom l passes through
+// to the textinput so users can type paths like ~/local/foo; to change language
+// press Esc back to modePick first.
 type Model struct {
 	lang   Lang
 	mode   mode
@@ -44,9 +56,10 @@ type Model struct {
 	custom    textinput.Model
 	customErr string
 
-	chosen string // populated on successful pick; "" if quit without choosing
-	width  int
-	height int
+	chosen        string // populated on successful pick; "" if quit without choosing
+	quitRequested bool   // user pressed ctrl+c (parent should NOT propagate tea.Quit)
+	width         int
+	height        int
 }
 
 // NewModel builds the wizard. Pass the detected vaults; pass an empty slice
@@ -98,24 +111,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 var (
-	keyUp     = key.NewBinding(key.WithKeys("up", "k"))
-	keyDown   = key.NewBinding(key.WithKeys("down", "j"))
-	keyEnter  = key.NewBinding(key.WithKeys("enter"))
-	keyTab    = key.NewBinding(key.WithKeys("tab"))
-	keyEsc    = key.NewBinding(key.WithKeys("esc"))
-	keyQuit   = key.NewBinding(key.WithKeys("ctrl+c"))
+	keyUp    = key.NewBinding(key.WithKeys("up", "k"))
+	keyDown  = key.NewBinding(key.WithKeys("down", "j"))
+	keyEnter = key.NewBinding(key.WithKeys("enter"))
+	keyLang  = key.NewBinding(key.WithKeys("l"))
+	keyEsc   = key.NewBinding(key.WithKeys("esc"))
+	keyQuit  = key.NewBinding(key.WithKeys("ctrl+c"))
 )
+
+func (m Model) toggleLang() Model {
+	if m.lang == LangEN {
+		m.lang = LangZH
+	} else {
+		m.lang = LangEN
+	}
+	return m
+}
 
 func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keyQuit):
+		m.quitRequested = true
 		return m, tea.Quit
-	case key.Matches(msg, keyTab):
-		if m.lang == LangEN {
-			m.lang = LangZH
-		} else {
-			m.lang = LangEN
-		}
+	case key.Matches(msg, keyEsc):
+		// In modePick, ESC means "cancel". Signal cancellation to the parent
+		// (when embedded as sub-model) by setting quitRequested. The standalone
+		// first-run wizard treats this the same as ctrl+c (no chosen path).
+		m.quitRequested = true
+		return m, tea.Quit
+	case key.Matches(msg, keyLang):
+		m = m.toggleLang()
 	case key.Matches(msg, keyUp):
 		if m.cursor > 0 {
 			m.cursor--
@@ -140,14 +165,8 @@ func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateCustom(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keyQuit):
+		m.quitRequested = true
 		return m, tea.Quit
-	case key.Matches(msg, keyTab):
-		if m.lang == LangEN {
-			m.lang = LangZH
-		} else {
-			m.lang = LangEN
-		}
-		return m, nil
 	case key.Matches(msg, keyEsc):
 		m.mode = modePick
 		m.custom.Blur()
@@ -170,6 +189,12 @@ func (m Model) updateCustom(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // Chosen returns the path the user picked, or "" if they quit without choosing.
 func (m Model) Chosen() string { return m.chosen }
+
+// QuitRequested reports whether the user explicitly asked to leave the
+// wizard (ctrl+c at any time, or ESC from modePick). Parent sub-model hosts
+// use this as the "cancel" signal instead of propagating tea.Quit, which
+// would kill the entire app.
+func (m Model) QuitRequested() bool { return m.quitRequested }
 
 // validateCustomPath expands ~ and checks the result is absolute. The parent
 // dir doesn't have to exist yet — Store creates it on first save.

@@ -14,27 +14,35 @@
 
 ```
 cmd/tick/main.go           入口：加载配置、建 store、跑 bubbletea
+cmd/seed/main.go           dev 工具：灌假数据（--days/--avg/--out）
 internal/store/
   types.go                 Feature / TodayResponse / ProjectItem
   markdown.go              parser / serializer / 文件 IO / Store 接口实现
   markdown_test.go         单测
+  stats.go                 GetCompletionsByDate：跨 tasks.md+archive.md 按日期计数
+  stats_test.go            单测
 internal/config/
   config.go                读 / 写 ~/.config/tick/config（key=value，行内 ` #` 注释）
   config_test.go
 internal/setup/
   detect.go                Obsidian vault 检测（读 obsidian.json）
   detect_test.go
-  strings.go               i18n EN/ZH strings 表
-  wizard.go                首次启动 wizard 的 bubbletea 子 model
+  strings.go               wizard 自己的 i18n 表（与主屏 i18n 解耦）
+  wizard.go                首次启动 / O 修改文件夹的 bubbletea 子 model
   wizard_test.go
+internal/i18n/
+  i18n.go                  TUI 双语字符串表 + Lang 类型 + 星期/月份本地化
+  i18n_test.go             单测
 internal/tui/
-  model.go                 Model + 状态机常量 + buildRows + 项目分组排序
-  update.go                Update：消息分发、store tea.Cmd、按键 handler
-  view.go                  View：列表渲染、padBetween、scrollWindow
+  model.go                 Model + 状态机常量 + buildRows + 项目分组排序 + lang/strings 字段
+  update.go                Update：消息分发、store tea.Cmd、按键 handler、l 切换语言
+  view.go                  View：列表渲染、padBetween、scrollWindow（走 m.strings 表）
   editor.go                ComputeGhostText / renderTitleWithGhost / renderProjectField
   styles.go                lipgloss 样式集中
-  keys.go                  bubbles/key 绑定 + shortHelp / longHelp
-  update_test.go           关键状态机单测
+  keys.go                  bubbles/key 绑定 + footerShortHelp（用 m.strings）
+  stats.go                 renderBars30 / renderHeatYear 纯渲染函数（接 i18n.TUIStrings）
+  stats_test.go            stats 渲染断言（EN + ZH 双语断言）
+  update_test.go           关键状态机单测（含 stats/settings/lang 切换）
 internal/watcher/
   watcher.go               fsnotify-based tasks.md 监听
 ```
@@ -107,16 +115,55 @@ mark-done / undone 是**就地操作**（仅修改 tasks.md），不跨文件移
   - row.daysAgo: 0 = today/pending，1 = yesterday done
 - 历史完成（2-6 天前 + archive.md）TUI 列表不读
 
+## Stats 30-day drill-down
+
+### 选中模式（drill-down）
+
+- 进入 modeStats30 默认**未选中**（无右 panel，首屏）
+- 按 `←` 一次 → 选中 today，进入 drill-down；右 panel 显示该日 task list
+- 再按 `←` → selectedDate -= 1d；超出 bars 窗口左边界时 statsWindowEnd -= 1（窗口左移），无界往前
+- `→` 反向；selectedDate 不超过 statsEnd（today）
+- `↑` / `k` / `↓` / `j` 滚动 task panel（selectedScroll）
+- `esc` 第一次：清 selectedDate，回首屏；第二次：退 stats 回 modeList
+- `s` 切 30 天：重置 selectedDate / selectedTasks / selectedScroll / statsWindowEnd
+
+### Task panel
+
+- 最多显示 10 条；超出显示 `↑ 上方 X 条` / `↓ 还有 X 条`
+- 切到新日期时 selectedScroll 重置为 0
+- task 行格式：`· @proj title`（proj 为空时 `· title`）；title 截断到 panel 宽度（lipgloss.Width 安全）
+
+### 布局
+
+- `width >= 70`（`wideStatsWidth`）→ 宽布局：bars 占 `barsAreaWidth=36` 列，右侧 panel 占剩余
+- `width < 70` → 窄布局：panel 在 bars 下方单列堆叠
+
+### Streak 算法
+
+- 从 today 倒数，遇到第一个 count == 0 的日停止
+- 使用 `statsData`（最近 30 天），streak >= 30 显示 `🔥 30+`
+- 在 `statsLoadedMsg` 到达时（加载完成后）由 `computeStreak()` 计算一次，缓存到 `m.streak`
+- 标题行右侧显示 `🔥 N 天`（ZH）/ `🔥 Nd`（EN）
+
+### 数据来源
+
+- `store.GetTasksOnDate(d)` 扫 tasks.md + archive.md，返回指定日的所有完成任务，按 ID 升序稳定排序
+- 每次 selectedDate 变化触发 `cmdLoadTasksOnDate`；stale response 用 `sameDay()` helper 按 Y/M/D 比较丢弃（不依赖字符串 format，避开 time-of-day drift）
+- `store.OldestCompletionDate()` 在 enterStats30 / enterStatsYear 触发一次（缓存到 `m.oldestDataDate`），ScrollLeft 在 proposed date 早于此值时拒绝并显示 footer 提示 `NoOlderData`
+
 ## bubbletea 状态机
 
 ```go
 type mode int
 const (
-    modeList         // 默认浏览态
-    modeEdit         // a 新建 / e 编辑
+    modeList          // 默认浏览态
+    modeEdit          // a 新建 / e 编辑
     modeConfirmUntick // U 后等 y/n
     modeConfirmDelete // D 后等 y/n
-    modeGraceUndo    // t 后 3s grace
+    modeGraceUndo     // t 后 3s grace
+    modeStats30       // s：30 天柱状图
+    modeStatsYear     // S：年度热力图
+    modeSettings      // O：修改文件夹（复用 wizard sub-model）
 )
 
 type editField int
@@ -192,13 +239,23 @@ done 区不分组。
 | `e`           | List         | 编辑当前行（pending: title/project; done: date）|
 | `D`           | List         | 删除（y/n 确认）                              |
 | `y`           | List         | 复制当前行的 title 到剪贴板                   |
+| `s`           | List/Stats   | 30 天柱状图（Stats 模式内：切到 30 天，重置选中）|
+| `S`           | List/Stats   | 年度热力图（Stats 模式内：切到年度）           |
+| `O`           | List         | 修改文件夹（复用 wizard；选完后 q 重启生效）   |
+| `l`           | List/Stats   | 切换中英文（持久化到 ~/.config/tick/config）   |
 | `?`           | List         | 切换详细帮助                                  |
 | `q` / `Ctrl+C`| List         | 退出                                          |
+| `←`           | Stats30      | 首次按：进入 drill-down（选中 today）；继续按：选中前一天；超出 30 天窗口时左移窗口 |
+| `→`           | Stats30      | 选中后一天（不超过 today）；窗口右移同步       |
+| `↑` / `k`     | Stats30 drill | 向上滚动 task panel                           |
+| `↓` / `j`     | Stats30 drill | 向下滚动 task panel                           |
 | Tab           | Edit         | 切下一个字段（pending edit 内）；项目 ghost 时先接受 |
 | Shift+Tab     | Edit         | 反向切                                        |
 | ↑ ↓           | Edit/Date    | ±1 天                                         |
 | Enter         | Edit         | 保存所有字段                                  |
 | ESC           | Edit         | 丢弃                                          |
+| ESC           | Stats30 drill | 第一次：退选中（回首屏）；第二次：退 stats 回主屏 |
+| ESC           | StatsYear/Stats30 idle | 退 stats 回主屏                  |
 | `y`           | Confirm      | 执行 untick / delete                          |
 | 任何其他键    | Confirm      | 取消                                          |
 
@@ -209,9 +266,39 @@ go test ./...                  # 全部测试
 make build                     # bin/tick
 make install                   # cp 到 ~/.local/bin/tick
 ./bin/tick                     # 运行（首次启动 wizard 选路径）
+make seed                      # 灌 365 天假数据到 /tmp/tick-demo（测试统计视图）
 ```
 
 `go env -w GOPROXY=https://goproxy.cn,direct` 走中国镜像。
+
+## 测试 stats 视图
+
+```bash
+# 1. 灌假数据
+go run ./cmd/seed --days 365 --avg 5 --out /tmp/tick-demo
+
+# 2. 启动（覆盖配置路径）
+TICK_TASKS_FILE=/tmp/tick-demo/tasks.md ./bin/tick
+
+# 3. 主屏看到 5 条 pending + 若干 done
+
+# 4. 按 s            → 30 天柱状图（窄窗口 40 列正常）
+#    按 S            → 年度热力图（需要 ≥ 60 列；窄窗口显示 resize 提示）
+#    在两个图之间    → s ↔ S 互切
+#    按 esc / q      → 回主屏
+
+# 5. 按 O            → 修改文件夹（wizard 子模式）
+#    选新路径 → enter → footer 提示 "config updated · q to restart"
+#    按 q            → 退出；下次启动用新路径
+
+# 6. 清理
+rm -rf /tmp/tick-demo
+```
+
+flag 说明（`go run ./cmd/seed`）：
+- `--days N`：覆盖最近 N 天（默认 365）
+- `--avg M`：平均每天 M 条 done（默认 5）
+- `--out DIR`：输出目录（**必填**，避免污染真实 tasks.md）
 
 ## 配置
 
@@ -219,15 +306,21 @@ make install                   # cp 到 ~/.local/bin/tick
 
 ```
 TICK_TASKS_FILE=<wizard 选定的绝对路径>
+TICK_LANG=en        # 或 zh；按 l 即时切换并回写
 ```
 
-行内注释 ` #`（空格 + 井号）会被截断。空值或字段缺失时 fallback 到默认 `~/.tick/tasks.md`。`archive.md` 自动放在同一目录。
+行内注释 ` #`（空格 + 井号）会被截断。空值或字段缺失时 fallback：
+- `TICK_TASKS_FILE` → `~/.tick/tasks.md`
+- `TICK_LANG` → `en`
 
-Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或 `~/.config/obsidian/obsidian.json`（Linux）列出已注册的 vault；用户选 vault 后路径自动拼成 `<vault>/.tick/tasks.md`。Tab 切英中。
+`archive.md` 自动放在 tasks.md 同一目录。
+
+Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或 `~/.config/obsidian/obsidian.json`（Linux）列出已注册的 vault；用户选 vault 后路径自动拼成 `<vault>/.tick/tasks.md`。Wizard 内 `l` 切英中（与主屏统一；路径输入框内 `l` 是普通字符，要切语言先 Esc 回选项页再按 `l`；仅影响 wizard 屏，主屏的 `l` 键独立持久化到 TICK_LANG）。
 
 ## 后续待做（v2）
 
-- 统计面板：30 天柱状图 + 年度热力图（`s` 切视图，stats 视图放开 40 字符宽度限制使用 terminal full width）
+- ~~统计面板：30 天柱状图 + 年度热力图~~（已完成：`s`/`S` 键）
+- ~~修改文件夹~~（已完成：`O` 键）
 - archive 按年拆分（5 年后再考虑）
 - `/` 搜索 / 过滤
 - 提交 `tick-obsidian` 到 Obsidian 官方插件市场（PR 到 `obsidianmd/obsidian-releases`）— 当前用户走 BRAT
@@ -243,8 +336,21 @@ Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或
 7. **`a` 永远 sticky**：连续新建是默认；不再保留"加一条退出"的非 sticky 模式。
 8. **8 字符 hex 随机 ID（不是顺序整数）**：手机插件 + Mac CLI 双向同步时，两端按"max+1"会撞 ID（实际遇到过 [63] 同 ID 导致 mark-done 走错行）。32 bit hex 碰撞概率近 0；sweep 还会兜底 re-roll 重复。
 9. **dot-prefix `.tick/` 目录**：放进 Obsidian vault 时被原生文件树自动隐藏，避免用户在 Obsidian 编辑器里改 markdown 导致 ID/状态错乱。
-10. **首次启动 wizard，不强制 hard-coded 路径**：`internal/setup/wizard.go` 扫 obsidian.json 列出 vaults，让用户选 vault 或自定义路径或默认 `~/.tick/tasks.md`。Tab 切英中。配置写到 `~/.config/tick/config` 后续不再问。
-11. **fsnotify 监听 + 编辑期间延迟 reload**：`internal/watcher` 监听父目录（atomic write 换 inode），消息通过 `tea.Program.Send(FileChangedMsg{})`；如果用户正在 modeEdit/Confirm/Grace，先 `m.pendingReload=true` 等回到 modeList 再 drain，避免吞掉用户半途的输入。
+10. **首次启动 wizard，不强制 hard-coded 路径**：`internal/setup/wizard.go` 扫 obsidian.json 列出 vaults，让用户选 vault 或自定义路径或默认 `~/.tick/tasks.md`。Tab 或 l 切英中（modeCustom 下只能 Tab）。配置写到 `~/.config/tick/config` 后续不再问。
+11. **fsnotify 监听 + 编辑期间延迟 reload**：`internal/watcher` 监听父目录（atomic write 换 inode），消息通过 `tea.Program.Send(FileChangedMsg{})`；如果用户正在 modeEdit/Confirm/Grace/Stats/Settings，先 `m.pendingReload=true` 等回到 modeList 再 drain，避免吞掉用户半途的输入。
+12. **stats 路径只读不 sweep**：`GetCompletionsByDate` 用 `loadTasksLockedSimple()` + `loadArchive()` 纯读，不触发 ID/date 补全写盘。统计是只读路径，副作用 sweep 会破坏"不变量：loadCompletions 读 ≠ loadTasks 写"的分离设计。
+13. **两个独立 stats 键 `s`/`S`**：30 天图保持 40 列窄窗口（`barRows=5, 30 列`）；年度图需 ≥60 列（53 周 × 1 字符），宽度不足时显示单行 resize 提示而非空白或 panic。
+14. **seed `--out` 强制指定目录**：不写默认路径，避免意外污染 `~/.tick/tasks.md` 或 Obsidian vault。
+15. **修改文件夹不做 hot-swap**：config.Write 后返回主屏，footer 提示"q to restart"；重建 store+watcher 的成本远高于一次重启。
+16. **TUI i18n 与 setup wizard i18n 解耦**：`internal/i18n` 服务于主屏（list/stats/footer/transient），`internal/setup` 内置自己的 strings 表（仅 wizard 字段）。两个独立体系：主屏 `l` 切换持久化到 `TICK_LANG`；wizard 内 `l` 切换仅当次屏内有效。理由：字段不重叠（wizard 提的"vault"/"custom path"主屏没有；主屏的"un-tick"/"copied"wizard 没有），合并会产生大量空字段并把两个独立 UI 模块耦合死。
+17. **`l` 切换语言不重载数据**：strings 是渲染层；按 l 只改 `m.lang`/`m.strings` 并写 config，不调用 `cmdLoadToday`。同一份 features 用新表重渲即可。
+18. **`l` 在 edit/confirm/grace 模式下不响应**：edit 模式下 `l` 是 textinput 普通字符（必须能在标题里输入字母 l）；confirm/grace 模式不期望干扰当前流。仅 modeList 和 modeStats* 接受 `l`。modeSettings 也不响应，让 wizard 自己的键继续生效。
+19. **wizard 切语言改用 `l`（与主屏统一），不保留 Tab**：`l` 仅在 modePick 切换；modeCustom 下 `l` 让 textinput 吃，避免误吞合法路径字符（`~/local/foo/tasks.md`）。要切语言先 Esc 回 modePick 再按 `l`。
+20. **streak 只看 last 30 天数据**：`computeStreak` 从 today 倒数最多 30 天；超过 30 天的连续 streak 显示 `🔥 30+`。简化版降低 API 调用，足够覆盖绝大多数真实使用场景；需要精确 365 天 streak 可在 v2 扩展。
+21. **drill-down 翻到最早一天就停**：`←` 翻到 `oldestDataDate`（最早完成日）再按一次会显示 `NoOlderData` 提示而不是无限往前翻——避免用户进入"全是空柱子"的虚无地带。`oldestDataDate` 在 enterStats30/Year 时一次性懒加载，未加载时（zero）按"无界"处理（首帧体验）。
+22. **宽 ≥ 70 时左右布局**：bars 区固定 `barsAreaWidth=36` 列，右侧 panel 按剩余宽自适应；窄窗口（< 70）panel 落底，保持单列可读。
+23. **drill-down stale response 丢弃**：`tasksOnDateLoadedMsg` 到达时用 `sameDay()` helper（Y/M/D field 比较）丢弃 stale 响应——不用字符串 format 比较，避免 time-of-day drift 误判。
+24. **archive.md 缺失静默兜底**：`loadArchive()` 遇 `os.IsNotExist` 返回空 slice + nil，让 stats 路径在 sync 冲突或手工删除场景下不报错——只读路径不该因可缺数据源而 fail。
 
 ## 发布渠道
 

@@ -6,8 +6,114 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/al4danim/tick-tui/internal/i18n"
+	"github.com/al4danim/tick-tui/internal/setup"
 	"github.com/al4danim/tick-tui/internal/store"
 )
+
+// --- stats mode switch tests -----------------------------------------------
+
+func TestStatsModeSwitch_s_enters30(t *testing.T) {
+	m := modelWithRows(nil, nil)
+
+	newM, cmd := update(m, pressKey("s"))
+
+	if newM.mode != modeStats30 {
+		t.Errorf("mode: got %v want modeStats30", newM.mode)
+	}
+	if cmd == nil {
+		t.Error("expected non-nil Cmd (load stats)")
+	}
+	if !newM.statsLoading {
+		t.Error("statsLoading should be true after entering stats30")
+	}
+}
+
+func TestStatsModeSwitch_S_entersYear(t *testing.T) {
+	m := modelWithRows(nil, nil)
+
+	newM, cmd := update(m, pressKey("S"))
+
+	if newM.mode != modeStatsYear {
+		t.Errorf("mode: got %v want modeStatsYear", newM.mode)
+	}
+	if cmd == nil {
+		t.Error("expected non-nil Cmd (load stats)")
+	}
+}
+
+func TestStatsModeSwitch_s_from_Year_goes30(t *testing.T) {
+	m := modelWithRows(nil, nil)
+	m.mode = modeStatsYear
+
+	newM, _ := update(m, pressKey("s"))
+
+	if newM.mode != modeStats30 {
+		t.Errorf("s from StatsYear: mode=%v want modeStats30", newM.mode)
+	}
+}
+
+func TestStatsModeSwitch_esc_back_to_list(t *testing.T) {
+	m := modelWithRows(nil, nil)
+	m.mode = modeStats30
+
+	newM, _ := update(m, pressSpecialKey(tea.KeyEsc))
+
+	if newM.mode != modeList {
+		t.Errorf("esc from stats30: mode=%v want modeList", newM.mode)
+	}
+}
+
+func TestStatsModeSwitch_esc_from_year_back_to_list(t *testing.T) {
+	m := modelWithRows(nil, nil)
+	m.mode = modeStatsYear
+
+	newM, _ := update(m, pressSpecialKey(tea.KeyEsc))
+
+	if newM.mode != modeList {
+		t.Errorf("esc from statsYear: mode=%v want modeList", newM.mode)
+	}
+}
+
+func TestStatsLoadedMsg_populatesData(t *testing.T) {
+	m := modelWithRows(nil, nil)
+	m.mode = modeStats30
+	m.statsLoading = true
+
+	data := map[string]int{"2026-05-01": 5, "2026-04-30": 3}
+	newM, _ := update(m, statsLoadedMsg{data: data})
+
+	if newM.statsLoading {
+		t.Error("statsLoading should be false after statsLoadedMsg")
+	}
+	if len(newM.statsData) != 2 {
+		t.Errorf("statsData: got %d entries want 2", len(newM.statsData))
+	}
+}
+
+func TestSettingsKey_O_entersSettings(t *testing.T) {
+	m := modelWithRows(nil, nil)
+
+	newM, _ := update(m, pressKey("O"))
+
+	if newM.mode != modeSettings {
+		t.Errorf("mode: got %v want modeSettings", newM.mode)
+	}
+}
+
+func TestSettingsKey_O_esc_returns_list(t *testing.T) {
+	m := modelWithRows(nil, nil)
+	m, _ = update(m, pressKey("O"))
+	if m.mode != modeSettings {
+		t.Fatalf("setup: expected modeSettings, got %v", m.mode)
+	}
+
+	newM, _ := update(m, pressSpecialKey(tea.KeyEsc))
+
+	if newM.mode != modeList {
+		t.Errorf("esc from settings: mode=%v want modeList", newM.mode)
+	}
+}
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -21,7 +127,7 @@ func doneFeature(id string, title string) store.Feature {
 }
 
 func modelWithRows(pending, done []store.Feature) Model {
-	m := NewModel(nil) // nil client: tests don't call API
+	m := NewModel(nil, i18n.LangEN, "") // nil client: tests don't call API
 	m.today = store.TodayResponse{
 		Pending:    pending,
 		Done:       done,
@@ -34,7 +140,7 @@ func modelWithRows(pending, done []store.Feature) Model {
 }
 
 func modelWithRowsAndYesterday(pending, done, doneYesterday []store.Feature) Model {
-	m := NewModel(nil)
+	m := NewModel(nil, i18n.LangEN, "")
 	m.today = store.TodayResponse{
 		Pending:       pending,
 		Done:          done,
@@ -454,21 +560,21 @@ func TestRenderTitleWithGhost_CJK_posExceedsLen(t *testing.T) {
 
 func TestRenderSeparator_zeroWidth_noPanic(t *testing.T) {
 	// Must not panic with strings.Repeat negative count
-	got := renderSeparator(0)
+	got := renderSeparator(0, " done ")
 	if got == "" {
 		t.Error("expected non-empty fallback")
 	}
 }
 
 func TestRenderSeparator_veryNarrow_noPanic(t *testing.T) {
-	got := renderSeparator(3)
+	got := renderSeparator(3, " done ")
 	if got == "" {
 		t.Error("expected non-empty fallback")
 	}
 }
 
 func TestRenderSeparator_normalWidth(t *testing.T) {
-	got := renderSeparator(40)
+	got := renderSeparator(40, " done ")
 	// A normal-width separator should contain the label text
 	if !containsSubstring(got, "done") {
 		t.Errorf("separator should contain 'done', got %q", got)
@@ -1376,7 +1482,7 @@ func TestRenderFeatureLine_yesterdayWithProject(t *testing.T) {
 	yesterday := "2026-04-30"
 	f.CompletedAt = &yesterday
 
-	m := NewModel(nil)
+	m := NewModel(nil, i18n.LangEN, "")
 	m.width = 40
 	m.height = 24
 
@@ -1452,8 +1558,10 @@ func (e *clipboardErr) Error() string { return e.s }
 
 // stubClient implements the api.Client interface surface used by tests.
 type stubClient struct {
-	createFn func(text, date string) (*store.Feature, error)
-	updateFn func(id string, title, project string, date *string) (*store.Feature, error)
+	createFn         func(text, date string) (*store.Feature, error)
+	updateFn         func(id string, title, project string, date *string) (*store.Feature, error)
+	tasksOnDateFn    func(d time.Time) ([]store.Feature, error)
+	oldestDataFn     func() (time.Time, error)
 }
 
 func (s *stubClient) GetToday() (*store.TodayResponse, error) {
@@ -1472,9 +1580,24 @@ func (s *stubClient) Update(id string, title, project string, date *string) (*st
 	}
 	return &store.Feature{}, nil
 }
-func (s *stubClient) MarkDone(id string) (*store.Feature, error)  { return &store.Feature{}, nil }
-func (s *stubClient) Undone(id string) (*store.Feature, error)    { return &store.Feature{}, nil }
-func (s *stubClient) Delete(id string) error                    { return nil }
+func (s *stubClient) MarkDone(id string) (*store.Feature, error) { return &store.Feature{}, nil }
+func (s *stubClient) Undone(id string) (*store.Feature, error)   { return &store.Feature{}, nil }
+func (s *stubClient) Delete(id string) error                     { return nil }
+func (s *stubClient) GetCompletionsByDate(start, end time.Time) (map[string]int, error) {
+	return map[string]int{}, nil
+}
+func (s *stubClient) GetTasksOnDate(d time.Time) ([]store.Feature, error) {
+	if s.tasksOnDateFn != nil {
+		return s.tasksOnDateFn(d)
+	}
+	return nil, nil
+}
+func (s *stubClient) OldestCompletionDate() (time.Time, error) {
+	if s.oldestDataFn != nil {
+		return s.oldestDataFn()
+	}
+	return time.Time{}, nil
+}
 
 
 // itoa is defined in update.go (package tui), no duplicate needed here.
@@ -1664,5 +1787,745 @@ func TestGraceCountdown(t *testing.T) {
 	}
 	if noopCmd != nil {
 		t.Error("mismatched ID tick should not re-arm")
+	}
+}
+
+// --- language toggle (l) --------------------------------------------------
+
+// withSetLangStub installs a stubbed config.SetLang for one test.
+func withSetLangStub(t *testing.T, fn func(path, lang string) error) *[]struct{ Path, Lang string } {
+	t.Helper()
+	prev := setLangPersist
+	calls := []struct{ Path, Lang string }{}
+	setLangPersist = func(path, lang string) error {
+		calls = append(calls, struct{ Path, Lang string }{path, lang})
+		return fn(path, lang)
+	}
+	t.Cleanup(func() { setLangPersist = prev })
+	return &calls
+}
+
+func TestLangToggle_FromListFlipsLangAndStrings(t *testing.T) {
+	calls := withSetLangStub(t, func(path, lang string) error { return nil })
+
+	m := modelWithRows(nil, nil)
+	m.configPath = "/fake/config"
+	if m.lang != i18n.LangEN {
+		t.Fatalf("setup: lang=%v want EN", m.lang)
+	}
+	if m.strings.Loading != "loading…" {
+		t.Fatalf("setup: EN strings expected, got Loading=%q", m.strings.Loading)
+	}
+
+	newM, _ := update(m, pressKey("l"))
+
+	if newM.lang != i18n.LangZH {
+		t.Errorf("after l: lang=%v want ZH", newM.lang)
+	}
+	if newM.strings.Loading != "加载中…" {
+		t.Errorf("after l: strings should be ZH; got Loading=%q", newM.strings.Loading)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("expected 1 SetLang call, got %d", len(*calls))
+	}
+	if (*calls)[0].Lang != "zh" {
+		t.Errorf("SetLang lang arg: got %q want %q", (*calls)[0].Lang, "zh")
+	}
+	if (*calls)[0].Path != "/fake/config" {
+		t.Errorf("SetLang path arg: got %q", (*calls)[0].Path)
+	}
+}
+
+func TestLangToggle_RoundTrip(t *testing.T) {
+	withSetLangStub(t, func(path, lang string) error { return nil })
+
+	m := modelWithRows(nil, nil)
+	m.configPath = "/fake/config"
+
+	m, _ = update(m, pressKey("l")) // EN → ZH
+	if m.lang != i18n.LangZH {
+		t.Fatalf("first toggle: lang=%v want ZH", m.lang)
+	}
+	m, _ = update(m, pressKey("l")) // ZH → EN
+	if m.lang != i18n.LangEN {
+		t.Errorf("second toggle: lang=%v want EN", m.lang)
+	}
+	if m.strings.Loading != "loading…" {
+		t.Errorf("second toggle: should be EN strings again; got Loading=%q", m.strings.Loading)
+	}
+}
+
+func TestLangToggle_FromStats30Works(t *testing.T) {
+	withSetLangStub(t, func(path, lang string) error { return nil })
+
+	m := modelWithRows(nil, nil)
+	m.configPath = "/fake/config"
+	m.mode = modeStats30 // already in stats
+
+	newM, _ := update(m, pressKey("l"))
+
+	if newM.mode != modeStats30 {
+		t.Errorf("toggle inside stats: mode should stay modeStats30; got %v", newM.mode)
+	}
+	if newM.lang != i18n.LangZH {
+		t.Errorf("toggle inside stats: lang=%v want ZH", newM.lang)
+	}
+}
+
+func TestLangToggle_FromStatsYearWorks(t *testing.T) {
+	withSetLangStub(t, func(path, lang string) error { return nil })
+
+	m := modelWithRows(nil, nil)
+	m.configPath = "/fake/config"
+	m.mode = modeStatsYear
+
+	newM, _ := update(m, pressKey("l"))
+
+	if newM.mode != modeStatsYear {
+		t.Errorf("mode should remain modeStatsYear; got %v", newM.mode)
+	}
+	if newM.lang != i18n.LangZH {
+		t.Errorf("lang=%v want ZH", newM.lang)
+	}
+}
+
+func TestLangToggle_NoConfigPath_DoesNotPanicOrCallSetLang(t *testing.T) {
+	calls := withSetLangStub(t, func(path, lang string) error { return nil })
+
+	m := modelWithRows(nil, nil)
+	// configPath is "" → SetLang must NOT be called
+	newM, _ := update(m, pressKey("l"))
+
+	if newM.lang != i18n.LangZH {
+		t.Errorf("toggle should still flip in-memory lang; got %v", newM.lang)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("SetLang must not be called when configPath is empty; got %d calls", len(*calls))
+	}
+}
+
+func TestLangToggle_DoesNotFireInEditMode(t *testing.T) {
+	withSetLangStub(t, func(path, lang string) error {
+		t.Fatalf("SetLang should NOT be called from edit mode")
+		return nil
+	})
+
+	m := modelWithRows(nil, nil)
+	m.configPath = "/fake/config"
+	m, _ = update(m, pressKey("a")) // enter edit
+	if m.mode != modeEdit {
+		t.Fatalf("setup: expected modeEdit")
+	}
+
+	// Pressing 'l' in edit should land as a textinput character, not toggle lang.
+	newM, _ := update(m, pressKey("l"))
+	if newM.lang != i18n.LangEN {
+		t.Errorf("'l' in edit mode must not toggle lang; got %v", newM.lang)
+	}
+	if !strings.Contains(newM.titleInput.Value(), "l") {
+		t.Errorf("'l' in edit mode should be typed into titleInput; got %q", newM.titleInput.Value())
+	}
+}
+
+func TestLangToggle_PersistFailureSurfacesError(t *testing.T) {
+	withSetLangStub(t, func(path, lang string) error {
+		return &clipboardErr{"disk full"}
+	})
+
+	m := modelWithRows(nil, nil)
+	m.configPath = "/fake/config"
+
+	newM, _ := update(m, pressKey("l"))
+
+	// Lang flips in-memory regardless of persistence.
+	if newM.lang != i18n.LangZH {
+		t.Errorf("lang should flip even if persist fails; got %v", newM.lang)
+	}
+	if !newM.footerErr {
+		t.Error("footerErr should be true after persist failure")
+	}
+	if !strings.Contains(newM.footerMsg, "disk full") {
+		t.Errorf("footerMsg should mention reason; got %q", newM.footerMsg)
+	}
+}
+
+// TestLangToggle_AffectsRenderedFooter is an end-to-end check that toggling
+// lang actually changes what `View()` produces.
+func TestLangToggle_AffectsRenderedFooter(t *testing.T) {
+	withSetLangStub(t, func(path, lang string) error { return nil })
+
+	m := modelWithRows([]store.Feature{pendingFeature("1", "task")}, nil)
+	m.configPath = "/fake/config"
+	m.width = 80
+	m.height = 24
+
+	// EN footer contains "a add"
+	enFooter := m.renderFooter()
+	if !containsSubstring(enFooter, "a add") {
+		t.Errorf("EN footer should contain 'a add'; got %q", enFooter)
+	}
+
+	// Toggle → ZH
+	m, _ = update(m, pressKey("l"))
+
+	zhFooter := m.renderFooter()
+	if !containsSubstring(zhFooter, "a 新建") {
+		t.Errorf("ZH footer should contain 'a 新建'; got %q", zhFooter)
+	}
+	if containsSubstring(zhFooter, "a add") {
+		t.Errorf("ZH footer should NOT contain 'a add'; got %q", zhFooter)
+	}
+}
+
+// TestLangToggle_LongHelpAlsoLocalized verifies `?` help block flips with `l`.
+func TestLangToggle_LongHelpAlsoLocalized(t *testing.T) {
+	withSetLangStub(t, func(path, lang string) error { return nil })
+
+	m := modelWithRows(nil, nil)
+	m.configPath = "/fake/config"
+	m.width = 80
+	m.height = 24
+	m.helpExpanded = true
+
+	enHelp := m.renderFooter()
+	if !containsSubstring(enHelp, "Navigation") {
+		t.Errorf("EN longHelp should contain 'Navigation'; got %q", enHelp)
+	}
+
+	m, _ = update(m, pressKey("l"))
+	zhHelp := m.renderFooter()
+	if !containsSubstring(zhHelp, "导航") {
+		t.Errorf("ZH longHelp should contain '导航'; got %q", zhHelp)
+	}
+}
+
+// TestLangToggle_TitleBarLocalized verifies the addingChip + done count
+// localize when toggling.
+func TestLangToggle_TitleBarLocalized(t *testing.T) {
+	withSetLangStub(t, func(path, lang string) error { return nil })
+
+	m := modelWithRows(nil, nil)
+	m.configPath = "/fake/config"
+	m.width = 80
+	m.height = 24
+	m.today = store.TodayResponse{DoneToday: 2, TotalToday: 5}
+
+	en := m.renderTitleBar()
+	if !containsSubstring(en, "2/5 done") {
+		t.Errorf("EN title bar should contain '2/5 done'; got %q", en)
+	}
+
+	m, _ = update(m, pressKey("l"))
+	zh := m.renderTitleBar()
+	if !containsSubstring(zh, "2/5 完成") {
+		t.Errorf("ZH title bar should contain '2/5 完成'; got %q", zh)
+	}
+}
+
+// TestLangToggle_GraceMessageLocalized: pressing `t` in ZH should produce
+// the localized grace footer.
+func TestLangToggle_GraceMessageLocalized(t *testing.T) {
+	withSetLangStub(t, func(path, lang string) error { return nil })
+
+	m := modelWithRows([]store.Feature{pendingFeature("1", "task")}, nil)
+	m.configPath = "/fake/config"
+
+	// Toggle to ZH first
+	m, _ = update(m, pressKey("l"))
+	if m.lang != i18n.LangZH {
+		t.Fatalf("setup: should be ZH now")
+	}
+
+	newM, _ := update(m, pressKey("t"))
+	if !containsSubstring(newM.footerMsg, "已完成") {
+		t.Errorf("ZH grace footer should contain '已完成'; got %q", newM.footerMsg)
+	}
+	if !containsSubstring(newM.footerMsg, "撤销") {
+		t.Errorf("ZH grace footer should contain '撤销'; got %q", newM.footerMsg)
+	}
+}
+
+// TestModel_DefaultEN: when constructed with LangEN, strings table is EN.
+func TestModel_NewModelLangParam(t *testing.T) {
+	m := NewModel(nil, i18n.LangZH, "")
+	if m.lang != i18n.LangZH {
+		t.Errorf("NewModel lang: got %v want ZH", m.lang)
+	}
+	if m.strings.Loading != "加载中…" {
+		t.Errorf("NewModel ZH strings not loaded; got Loading=%q", m.strings.Loading)
+	}
+}
+
+// TestLangToggle_NoOpInGraceAndConfirm verifies that `l` is intentionally
+// inert in modeGraceUndo / modeConfirmUntick / modeConfirmDelete. These
+// modes route to their own key handlers which deliberately don't dispatch
+// to handleListKey, so `l` falls through. (In confirm modes "anything but y"
+// is treated as "cancel", so the lang stays put.)
+func TestLangToggle_NoOpInGraceAndConfirm(t *testing.T) {
+	withSetLangStub(t, func(path, lang string) error {
+		t.Fatalf("SetLang must not be called from grace/confirm modes")
+		return nil
+	})
+
+	cases := []struct {
+		name     string
+		setupFn  func(m *Model)
+		wantMode mode
+	}{
+		{
+			name: "modeGraceUndo",
+			setupFn: func(m *Model) {
+				m.mode = modeGraceUndo
+				m.graceID = "1"
+			},
+			wantMode: modeList, // grace consumes any non-u key by exiting to list
+		},
+		{
+			name: "modeConfirmUntick",
+			setupFn: func(m *Model) {
+				m.mode = modeConfirmUntick
+				m.pendingID = "1"
+			},
+			wantMode: modeList, // confirm cancels on any non-y key
+		},
+		{
+			name: "modeConfirmDelete",
+			setupFn: func(m *Model) {
+				m.mode = modeConfirmDelete
+				m.pendingID = "1"
+			},
+			wantMode: modeList,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := modelWithRows([]store.Feature{pendingFeature("1", "task")}, nil)
+			m.configPath = "/fake/config"
+			c.setupFn(&m)
+
+			newM, _ := update(m, pressKey("l"))
+
+			if newM.lang != i18n.LangEN {
+				t.Errorf("lang must not change in %s; got %v", c.name, newM.lang)
+			}
+			// Each mode's own handler is allowed to transition; we only assert
+			// lang invariance, not the specific outgoing mode.
+			_ = c.wantMode
+		})
+	}
+}
+
+// --- settings sub-model integration --------------------------------------
+
+// TestSettings_CtrlCDoesNotKillApp verifies fix #1 — ctrl+c inside settings
+// returns to modeList instead of propagating tea.Quit.
+//
+// We seed the settings sub-model directly so we don't depend on the host's
+// Obsidian config (vault detection runs in enterSettings).
+func TestSettings_CtrlCDoesNotKillApp(t *testing.T) {
+	m := modelWithRows(nil, nil)
+	m.mode = modeSettings
+	m.settingsModel = setup.NewModel(setup.LangEN, nil)
+
+	newM, cmd := update(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+
+	if newM.mode != modeList {
+		t.Errorf("ctrl+c should return to modeList, got %v", newM.mode)
+	}
+	// Crucial: cmd must NOT be tea.Quit (would kill the app). drainPendingReload
+	// returns nil when pendingReload is false (our case here).
+	if cmd != nil {
+		msg := cmd()
+		if _, isQuit := msg.(tea.QuitMsg); isQuit {
+			t.Error("ctrl+c from settings produced tea.Quit (would kill app)")
+		}
+	}
+}
+
+// TestSettings_EscFromModePickReturnsToList verifies that ESC from the
+// wizard's modePick lands back in the parent list (via QuitRequested).
+func TestSettings_EscFromModePickReturnsToList(t *testing.T) {
+	m := modelWithRows(nil, nil)
+	m.mode = modeSettings
+	m.settingsModel = setup.NewModel(setup.LangEN, nil)
+
+	newM, _ := update(m, tea.KeyMsg{Type: tea.KeyEsc})
+
+	if newM.mode != modeList {
+		t.Errorf("ESC from modePick should return to modeList, got %v", newM.mode)
+	}
+}
+
+// TestSettings_EscFromModeCustomStaysInWizard verifies fix #3 — ESC inside
+// the wizard's custom-path input only exits modeCustom → modePick, the
+// parent does NOT close settings.
+//
+// We construct the wizard sub-model directly with no vaults so the items
+// are deterministic ([default, custom]) regardless of the host machine's
+// real Obsidian config.
+func TestSettings_EscFromModeCustomStaysInWizard(t *testing.T) {
+	m := modelWithRows(nil, nil)
+	m.mode = modeSettings
+	m.settingsModel = setup.NewModel(setup.LangEN, nil) // no vaults → items = [default, custom]
+	// Move down to Custom (cursor 1) and Enter to enter modeCustom.
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.mode != modeSettings {
+		t.Fatalf("setup: parent mode should still be modeSettings after entering modeCustom, got %v", m.mode)
+	}
+
+	// ESC inside modeCustom → wizard internally goes back to modePick;
+	// parent must NOT close settings (this was the bug).
+	newM, _ := update(m, tea.KeyMsg{Type: tea.KeyEsc})
+
+	if newM.mode != modeSettings {
+		t.Errorf("ESC from modeCustom should keep parent in modeSettings, got %v", newM.mode)
+	}
+	if newM.settingsModel.Chosen() != "" {
+		t.Errorf("modeCustom ESC must not set Chosen(); got %q", newM.settingsModel.Chosen())
+	}
+	if newM.settingsModel.QuitRequested() {
+		t.Error("modeCustom ESC must not set QuitRequested (it only goes back to modePick)")
+	}
+}
+
+// TestSettings_InheritsTUILang verifies fix #2 — the wizard sub-model
+// constructed by `O` opens in the user's current TUI language.
+func TestSettings_InheritsTUILang(t *testing.T) {
+	m := modelWithRows(nil, nil)
+	m.lang = i18n.LangZH
+	m.strings = i18n.For(i18n.LangZH)
+
+	newM, _ := update(m, pressKey("O"))
+
+	if newM.mode != modeSettings {
+		t.Fatalf("setup: expected modeSettings")
+	}
+	view := newM.settingsModel.View()
+	if !containsSubstring(view, "欢迎使用 tick") {
+		t.Errorf("wizard should open in ZH (matching parent lang); view=\n%s", view)
+	}
+}
+
+// TestSettings_DefaultENWhenParentEN: complement to the above — parent EN
+// produces EN wizard.
+func TestSettings_DefaultENWhenParentEN(t *testing.T) {
+	m := modelWithRows(nil, nil)
+	// lang defaults to EN
+
+	newM, _ := update(m, pressKey("O"))
+
+	view := newM.settingsModel.View()
+	if !containsSubstring(view, "Welcome to tick") {
+		t.Errorf("wizard should open in EN; view=\n%s", view)
+	}
+}
+
+// TestI18nLangToSetupLang verifies the boundary mapping helper.
+// setup.Lang has no public String(), so we assert behavior via the rendered
+// wizard view (the only externally observable difference).
+func TestI18nLangToSetupLang(t *testing.T) {
+	mEN := setup.NewModel(i18nLangToSetupLang(i18n.LangEN), nil)
+	if !strings.Contains(mEN.View(), "Welcome to tick") {
+		t.Errorf("EN mapping should produce English wizard; got:\n%s", mEN.View())
+	}
+	mZH := setup.NewModel(i18nLangToSetupLang(i18n.LangZH), nil)
+	if !strings.Contains(mZH.View(), "欢迎使用 tick") {
+		t.Errorf("ZH mapping should produce Chinese wizard; got:\n%s", mZH.View())
+	}
+}
+
+// ----- stats30 drill-down key tests ----------------------------------------
+
+// modelInStats30 returns a Model in modeStats30 with statsEnd set to today.
+func modelInStats30() Model {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	timeNow = func() time.Time { return today }
+	m := modelWithRows(nil, nil)
+	m.mode = modeStats30
+	m.statsEnd = today
+	m.statsWindowEnd = today
+	m.statsData = map[string]int{}
+	return m
+}
+
+func TestStats30_LeftEntersDrillDown(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	timeNow = func() time.Time { return today }
+	defer func() { timeNow = time.Now }()
+
+	m := modelInStats30()
+
+	newM, cmd := update(m, pressSpecialKey(tea.KeyLeft))
+
+	if newM.selectedDate.IsZero() {
+		t.Error("first ← should set selectedDate to today")
+	}
+	if !newM.selectedDate.Equal(today) {
+		t.Errorf("selectedDate: got %v want %v", newM.selectedDate, today)
+	}
+	if cmd == nil {
+		t.Error("expected non-nil Cmd (cmdLoadTasksOnDate)")
+	}
+	if newM.selectedScroll != 0 {
+		t.Errorf("selectedScroll should be reset to 0; got %d", newM.selectedScroll)
+	}
+}
+
+func TestStats30_LeftKeepsScrollingPastWindow(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	timeNow = func() time.Time { return today }
+	defer func() { timeNow = time.Now }()
+
+	m := modelInStats30()
+	// Select the leftmost day of the window (today - 29).
+	leftEdge := today.AddDate(0, 0, -29)
+	m.selectedDate = leftEdge
+	m.statsWindowEnd = today
+
+	newM, _ := update(m, pressSpecialKey(tea.KeyLeft))
+
+	// selectedDate goes one more day back.
+	wantDate := leftEdge.AddDate(0, 0, -1)
+	if !newM.selectedDate.Equal(wantDate) {
+		t.Errorf("selectedDate: got %v want %v", newM.selectedDate, wantDate)
+	}
+	// Window should slide left too.
+	wantWindowEnd := today.AddDate(0, 0, -1)
+	if !newM.statsWindowEnd.Equal(wantWindowEnd) {
+		t.Errorf("statsWindowEnd: got %v want %v", newM.statsWindowEnd, wantWindowEnd)
+	}
+}
+
+func TestStats30_RightStopsAtToday(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	timeNow = func() time.Time { return today }
+	defer func() { timeNow = time.Now }()
+
+	m := modelInStats30()
+	m.selectedDate = today // already at today
+
+	newM, cmd := update(m, pressSpecialKey(tea.KeyRight))
+
+	// Should not advance past today.
+	if !newM.selectedDate.Equal(today) {
+		t.Errorf("→ at today should not advance; got %v", newM.selectedDate)
+	}
+	if cmd != nil {
+		t.Error("no cmd should fire when → is blocked at today")
+	}
+}
+
+func TestStats30_RightAdvancesDate(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	timeNow = func() time.Time { return today }
+	defer func() { timeNow = time.Now }()
+
+	m := modelInStats30()
+	yesterday := today.AddDate(0, 0, -1)
+	m.selectedDate = yesterday
+
+	newM, cmd := update(m, pressSpecialKey(tea.KeyRight))
+
+	if !newM.selectedDate.Equal(today) {
+		t.Errorf("→ from yesterday: got %v want today %v", newM.selectedDate, today)
+	}
+	if cmd == nil {
+		t.Error("expected non-nil Cmd (load tasks for today)")
+	}
+}
+
+func TestStats30_DownScrolls(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	m := modelInStats30()
+	m.selectedDate = today
+	m.selectedTasks = make([]store.Feature, 12)
+	m.selectedScroll = 0
+
+	newM, _ := update(m, pressKey("j"))
+
+	if newM.selectedScroll != 1 {
+		t.Errorf("j should scroll down; got %d want 1", newM.selectedScroll)
+	}
+}
+
+func TestStats30_DownStopsAtMax(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	m := modelInStats30()
+	m.selectedDate = today
+	m.selectedTasks = make([]store.Feature, 12) // max scroll = 12-10 = 2
+	m.selectedScroll = 0
+
+	// Press down 10 times
+	for i := 0; i < 10; i++ {
+		var cmd tea.Cmd
+		m, cmd = update(m, pressKey("j"))
+		_ = cmd
+	}
+
+	if m.selectedScroll > 2 {
+		t.Errorf("scroll should cap at 2; got %d", m.selectedScroll)
+	}
+}
+
+func TestStats30_EscOnceClearsSelection(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	m := modelInStats30()
+	m.selectedDate = today
+	m.selectedTasks = []store.Feature{{ID: "x", Title: "task", IsDone: 1}}
+
+	newM, _ := update(m, pressSpecialKey(tea.KeyEsc))
+
+	if newM.mode != modeStats30 {
+		t.Errorf("first esc: expected to stay in modeStats30; got %v", newM.mode)
+	}
+	if !newM.selectedDate.IsZero() {
+		t.Errorf("first esc: selectedDate should be cleared; got %v", newM.selectedDate)
+	}
+	if newM.selectedTasks != nil {
+		t.Errorf("first esc: selectedTasks should be nil; got %v", newM.selectedTasks)
+	}
+}
+
+func TestStats30_EscTwiceExitsToList(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	m := modelInStats30()
+	m.selectedDate = today
+
+	// First esc: clears selection, stays in modeStats30.
+	m, _ = update(m, pressSpecialKey(tea.KeyEsc))
+	if m.mode != modeStats30 {
+		t.Fatalf("first esc: expected modeStats30; got %v", m.mode)
+	}
+
+	// Second esc: returns to modeList.
+	m, _ = update(m, pressSpecialKey(tea.KeyEsc))
+	if m.mode != modeList {
+		t.Errorf("second esc: expected modeList; got %v", m.mode)
+	}
+}
+
+func TestStats30_S_ResetsSelection(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	timeNow = func() time.Time { return today }
+	defer func() { timeNow = time.Now }()
+
+	m := modelInStats30()
+	m.selectedDate = today
+	m.selectedTasks = []store.Feature{{ID: "y", Title: "task", IsDone: 1}}
+
+	newM, _ := update(m, pressKey("s"))
+
+	if !newM.selectedDate.IsZero() {
+		t.Errorf("s should reset selectedDate; got %v", newM.selectedDate)
+	}
+	if newM.selectedTasks != nil {
+		t.Errorf("s should reset selectedTasks; got %v", newM.selectedTasks)
+	}
+}
+
+func TestStats30_TasksOnDateLoadedMsg_Applied(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	m := modelInStats30()
+	m.selectedDate = today
+
+	tasks := []store.Feature{{ID: "aa", Title: "loaded task", IsDone: 1}}
+	newM, _ := update(m, tasksOnDateLoadedMsg{date: today, tasks: tasks})
+
+	if len(newM.selectedTasks) != 1 {
+		t.Errorf("expected 1 task; got %d", len(newM.selectedTasks))
+	}
+	if newM.selectedTasks[0].Title != "loaded task" {
+		t.Errorf("wrong task title: %s", newM.selectedTasks[0].Title)
+	}
+}
+
+func TestStats30_TasksOnDateLoadedMsg_StaleDiscarded(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	yesterday := today.AddDate(0, 0, -1)
+	m := modelInStats30()
+	m.selectedDate = today // currently selecting today
+
+	// A stale response for yesterday should be ignored.
+	tasks := []store.Feature{{ID: "bb", Title: "stale task", IsDone: 1}}
+	newM, _ := update(m, tasksOnDateLoadedMsg{date: yesterday, tasks: tasks})
+
+	if len(newM.selectedTasks) != 0 && newM.selectedTasks != nil {
+		t.Errorf("stale tasksOnDate response should be discarded; got %v", newM.selectedTasks)
+	}
+}
+
+// TestStats30_LeftStopsAtOldestData verifies that ← refuses to scroll past the
+// store-reported oldest completion date and surfaces a footer hint instead.
+func TestStats30_LeftStopsAtOldestData(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	timeNow = func() time.Time { return today }
+	defer func() { timeNow = time.Now }()
+
+	m := modelInStats30()
+	oldest := today.AddDate(0, 0, -100)
+	m.oldestDataDate = oldest
+	// Simulate the user already at the oldest date.
+	m.selectedDate = oldest
+	m.statsWindowEnd = oldest.AddDate(0, 0, 29) // arbitrary; not asserted
+
+	newM, _ := update(m, pressSpecialKey(tea.KeyLeft))
+
+	// selectedDate must NOT advance past oldest.
+	if !sameDay(newM.selectedDate, oldest) {
+		t.Errorf("selectedDate should stay at oldest=%v; got %v", oldest, newM.selectedDate)
+	}
+	if newM.footerMsg == "" {
+		t.Error("expected transient footer with NoOlderData hint")
+	}
+	if !strings.Contains(newM.footerMsg, "no older data") {
+		t.Errorf("footer should contain 'no older data'; got %q", newM.footerMsg)
+	}
+}
+
+// TestStats30_LeftWorksWhenOldestUnknown verifies that left-arrow scrolling is
+// unbounded if oldestDataDate has not loaded yet (zero time).
+func TestStats30_LeftWorksWhenOldestUnknown(t *testing.T) {
+	today := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	timeNow = func() time.Time { return today }
+	defer func() { timeNow = time.Now }()
+
+	m := modelInStats30()
+	// oldestDataDate left zero — should not block scrolling.
+	m.selectedDate = today.AddDate(0, 0, -200) // already far into the past
+
+	newM, _ := update(m, pressSpecialKey(tea.KeyLeft))
+
+	// selectedDate should still advance.
+	want := today.AddDate(0, 0, -201)
+	if !sameDay(newM.selectedDate, want) {
+		t.Errorf("selectedDate: got %v want %v (unbounded when oldest unknown)", newM.selectedDate, want)
+	}
+}
+
+// TestOldestDataLoadedMsg_PopulatesField verifies the message handler.
+func TestOldestDataLoadedMsg_PopulatesField(t *testing.T) {
+	m := modelWithRows(nil, nil)
+	d := time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC)
+
+	newM, _ := update(m, oldestDataLoadedMsg{d: d})
+
+	if !newM.oldestDataDate.Equal(d) {
+		t.Errorf("oldestDataDate: got %v want %v", newM.oldestDataDate, d)
+	}
+}
+
+// TestSameDay verifies the helper handles date-only equality regardless of
+// time-of-day component drift.
+func TestSameDay(t *testing.T) {
+	a := time.Date(2026, 5, 2, 14, 30, 0, 0, time.UTC)
+	b := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	if !sameDay(a, b) {
+		t.Errorf("sameDay should be true for same calendar day with different time-of-day")
+	}
+	c := time.Date(2026, 5, 3, 0, 0, 0, 0, time.UTC)
+	if sameDay(a, c) {
+		t.Errorf("sameDay should be false for different days")
 	}
 }

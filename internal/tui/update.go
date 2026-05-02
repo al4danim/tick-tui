@@ -9,10 +9,29 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/al4danim/tick-tui/internal/config"
+	"github.com/al4danim/tick-tui/internal/i18n"
+	"github.com/al4danim/tick-tui/internal/setup"
 	"github.com/al4danim/tick-tui/internal/store"
 )
 
+// setLangPersist is the hook used by `l` to write the new language to the
+// config file. Tests override it so they can assert calls without touching
+// the real filesystem.
+var setLangPersist = config.SetLang
+
 func itoa(i int) string { return strconv.Itoa(i) }
+
+// sameDay reports whether two times fall on the same calendar day (in their
+// own location). Use this instead of comparing formatted strings or raw
+// time.Equal — selectedDate is built via AddDate from a wall-clock now and
+// retains hour/min/sec, while incoming messages may carry a different instant
+// for the same day.
+func sameDay(a, b time.Time) bool {
+	ay, am, ad := a.Date()
+	by, bm, bd := b.Date()
+	return ay == by && am == bm && ad == bd
+}
 
 // copyToClipboard is the clipboard write hook. Tests replace it with a stub.
 var copyToClipboard = clipboard.WriteAll
@@ -29,6 +48,13 @@ type graceExpiredMsg struct{ id string }
 type footerExpireMsg struct{ token int }
 type graceTickMsg struct{ id string }
 type errMsg struct{ err error }
+type statsLoadedMsg struct{ data map[string]int }
+type tasksOnDateLoadedMsg struct {
+	date  time.Time
+	tasks []store.Feature
+}
+type oldestDataLoadedMsg struct{ d time.Time }
+type streakLoadedMsg struct{ n int }
 
 // FileChangedMsg fires when the watcher sees an external modification to
 // tasks.md. The cmd/tick wiring sends it via Program.Send. Exported so
@@ -63,6 +89,53 @@ func (m Model) cmdLoadProjects() tea.Cmd {
 			names[i] = p.Name
 		}
 		return projectsLoadedMsg{names}
+	}
+}
+
+func (m Model) cmdLoadStats(start, end time.Time) tea.Cmd {
+	return func() tea.Msg {
+		data, err := m.apiClient.GetCompletionsByDate(start, end)
+		if err != nil {
+			return errMsg{err}
+		}
+		return statsLoadedMsg{data}
+	}
+}
+
+func (m Model) cmdLoadTasksOnDate(d time.Time) tea.Cmd {
+	return func() tea.Msg {
+		tasks, err := m.apiClient.GetTasksOnDate(d)
+		if err != nil {
+			return errMsg{err}
+		}
+		return tasksOnDateLoadedMsg{date: d, tasks: tasks}
+	}
+}
+
+// cmdLoadOldestData fetches the earliest completion date once per stats entry.
+// Failures fall back silently to "unbounded" (zero time) — better UX than a
+// transient error every time the user opens stats.
+func (m Model) cmdLoadOldestData() tea.Cmd {
+	return func() tea.Msg {
+		d, err := m.apiClient.OldestCompletionDate()
+		if err != nil {
+			return oldestDataLoadedMsg{d: time.Time{}}
+		}
+		return oldestDataLoadedMsg{d: d}
+	}
+}
+
+// cmdLoadStreak fetches the current done-day streak from the store. The store
+// scans both tasks.md and archive.md so the streak can exceed 30 days. On
+// failure we fall back to 0 (rather than surfacing an error every entry); the
+// label simply renders "🔥 0d" until the next stats entry retries.
+func (m Model) cmdLoadStreak(today time.Time) tea.Cmd {
+	return func() tea.Msg {
+		n, err := m.apiClient.ComputeStreak(today)
+		if err != nil {
+			return streakLoadedMsg{n: 0}
+		}
+		return streakLoadedMsg{n: n}
 	}
 }
 
@@ -230,7 +303,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if secs > 3 {
 					secs = 3
 				}
-				m.footerMsg = "marked done · u to undo (" + itoa(secs) + "s)"
+				m.footerMsg = m.strings.MarkedDone(secs)
 				return m, cmdGraceTick(msg.id)
 			}
 			// Remaining ≤ 0: clear footer immediately to eliminate a 1-2 frame
@@ -241,6 +314,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case statsLoadedMsg:
+		m.statsData = msg.data
+		m.statsLoading = false
+		m.statsErr = nil
+		return m, nil
+
+	case streakLoadedMsg:
+		m.streak = msg.n
+		return m, nil
+
+	case tasksOnDateLoadedMsg:
+		// Only apply if this response matches the currently selected date
+		// (discard stale responses from rapidly-pressed arrow keys).
+		// Compare via Y/M/D fields to avoid time-of-day drift across the
+		// AddDate calls that produced selectedDate (no string formatting).
+		if sameDay(msg.date, m.selectedDate) {
+			m.selectedTasks = msg.tasks
+		}
+		return m, nil
+
+	case oldestDataLoadedMsg:
+		m.oldestDataDate = msg.d
+		return m, nil
+
 	case FileChangedMsg:
 		// External edit (mobile sync, Obsidian, manual edit). Reload now if the
 		// user is just browsing; otherwise queue it so we don't blow away an
@@ -248,6 +345,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeList {
 			return m, m.cmdLoadToday()
 		}
+		// In stats/settings modes, queue the reload until user returns to list.
 		m.pendingReload = true
 		return m, nil
 
@@ -256,7 +354,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// On any error, drop sticky-add so we don't auto-reopen edit on the next reload.
 		m.addSticky = false
 		// setTransientFooter resets footerErr=false, so set it true afterward.
-		cmd := m.setTransientFooter("error: " + msg.err.Error())
+		cmd := m.setTransientFooter(m.strings.ErrorMsg(msg.err.Error()))
 		m.footerErr = true
 		return m, cmd
 
@@ -278,6 +376,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmDeleteKey(msg)
 	case modeEdit:
 		return m.handleEditKey(msg)
+	case modeStats30, modeStatsYear:
+		return m.handleStatsKey(msg)
+	case modeSettings:
+		return m.handleSettingsKey(msg)
 	}
 	return m, nil
 }
@@ -369,6 +471,18 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Filter):
 		return m.handleFilterToggle()
+
+	case key.Matches(msg, keys.Stats30):
+		return m.enterStats30()
+
+	case key.Matches(msg, keys.StatsYear):
+		return m.enterStatsYear()
+
+	case key.Matches(msg, keys.Settings):
+		return m.enterSettings()
+
+	case key.Matches(msg, keys.Lang):
+		return m.toggleLang()
 	}
 	return m, nil
 }
@@ -407,11 +521,11 @@ func (m Model) handleYank() (Model, tea.Cmd) {
 	}
 	if err := copyToClipboard(f.Title); err != nil {
 		// setTransientFooter resets footerErr=false, so set it true afterward.
-		cmd := m.setTransientFooter("copy failed: " + err.Error())
+		cmd := m.setTransientFooter(m.strings.CopyFailed(err.Error()))
 		m.footerErr = true
 		return m, cmd
 	}
-	cmd := m.setTransientFooter(`copied "` + f.Title + `"`)
+	cmd := m.setTransientFooter(m.strings.CopiedTitle(f.Title))
 	return m, cmd
 }
 
@@ -434,6 +548,15 @@ func (m Model) handleGraceKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.graceID = ""
 		m.footerMsg = ""
 		return m, m.cmdUndone(id)
+	}
+	// `l` (lang toggle) is intentionally inert in grace mode — switching UI
+	// language while a destructive-undo timer is counting down would be
+	// surprising. We exit grace silently and drop the keypress.
+	if key.Matches(msg, keys.Lang) {
+		m.mode = modeList
+		m.graceID = ""
+		m.footerMsg = ""
+		return m, nil
 	}
 	// Any other key: leave grace and process key normally in list mode
 	m.mode = modeList
@@ -668,7 +791,7 @@ func (m Model) handleMarkDone() (Model, tea.Cmd) {
 	m.err = nil // clear any stale error so prompt isn't tinted red
 	m.footerErr = false
 	m.graceDeadline = time.Now().Add(3 * time.Second)
-	m.footerMsg = "marked done · u to undo (3s)"
+	m.footerMsg = m.strings.MarkedDone(3)
 	// Increment token so any pending transient timer won't clear this prompt.
 	m.footerToken++
 	return m, tea.Batch(m.cmdMarkDone(id), cmdGraceTimer(id), cmdGraceTick(id))
@@ -686,7 +809,7 @@ func (m Model) handleUntick() (Model, tea.Cmd) {
 	// Increment token so any pending transient timer won't clear this prompt.
 	m.footerToken++
 	title := f.Title
-	m.footerMsg = `un-tick "` + title + `"? y/n`
+	m.footerMsg = m.strings.UntickConfirm(title)
 	return m, nil
 }
 
@@ -702,8 +825,257 @@ func (m Model) handleDeletePrompt() (Model, tea.Cmd) {
 	// Increment token so any pending transient timer won't clear this prompt.
 	m.footerToken++
 	title := f.Title
-	m.footerMsg = `delete "` + title + `"? y/n`
+	m.footerMsg = m.strings.DeleteConfirm(title)
 	return m, nil
+}
+
+// ----- stats mode -----------------------------------------------------------
+
+func (m Model) enterStats30() (Model, tea.Cmd) {
+	now := timeNow()
+	end := now
+	start := now.AddDate(0, 0, -29)
+	m.mode = modeStats30
+	m.statsLoading = true
+	m.statsData = nil
+	m.statsErr = nil
+	m.statsEnd = end // pin "today" so the rendered axis matches the loaded window
+	// Reset drill-down state on every entry (s key while in stats also resets).
+	m.selectedDate = time.Time{}
+	m.selectedTasks = nil
+	m.selectedScroll = 0
+	m.statsWindowEnd = end
+	m.streak = 0
+	cmds := []tea.Cmd{m.cmdLoadStats(start, end), m.cmdLoadStreak(end)}
+	if m.oldestDataDate.IsZero() {
+		cmds = append(cmds, m.cmdLoadOldestData())
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m Model) enterStatsYear() (Model, tea.Cmd) {
+	now := timeNow()
+	end := now
+	start := now.AddDate(0, 0, -364)
+	m.mode = modeStatsYear
+	m.statsLoading = true
+	m.statsData = nil
+	m.statsErr = nil
+	m.statsEnd = end
+	cmds := []tea.Cmd{m.cmdLoadStats(start, end), m.cmdLoadStreak(end)}
+	if m.oldestDataDate.IsZero() {
+		cmds = append(cmds, m.cmdLoadOldestData())
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m Model) handleStatsKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Escape):
+		if m.mode == modeStats30 && !m.selectedDate.IsZero() {
+			// First esc: exit drill-down, return to idle stats view.
+			m.selectedDate = time.Time{}
+			m.selectedTasks = nil
+			m.selectedScroll = 0
+			return m, nil
+		}
+		// Second esc (or esc from year / idle stats): return to list.
+		m.mode = modeList
+		return m, m.drainPendingReload()
+
+	case key.Matches(msg, keys.Quit):
+		return m, tea.Quit
+
+	case key.Matches(msg, keys.Stats30):
+		// s while in either stats mode → go to 30-day (resets selection).
+		return m.enterStats30()
+
+	case key.Matches(msg, keys.StatsYear):
+		// S while in either stats mode → go to year.
+		return m.enterStatsYear()
+
+	case key.Matches(msg, keys.Lang):
+		return m.toggleLang()
+
+	case msg.String() == "left":
+		return m.statsScrollLeft()
+
+	case msg.String() == "right":
+		return m.statsScrollRight()
+
+	case msg.String() == "up" || msg.String() == "k":
+		if m.mode == modeStats30 && !m.selectedDate.IsZero() {
+			if m.selectedScroll > 0 {
+				m.selectedScroll--
+			}
+		}
+		return m, nil
+
+	case msg.String() == "down" || msg.String() == "j":
+		if m.mode == modeStats30 && !m.selectedDate.IsZero() {
+			max := len(m.selectedTasks) - 10
+			if max < 0 {
+				max = 0
+			}
+			if m.selectedScroll < max {
+				m.selectedScroll++
+			}
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// statsScrollLeft moves selectedDate one day earlier (or initializes to today on first press).
+// If the selected date moves outside the bars window, the window shifts left too.
+func (m Model) statsScrollLeft() (Model, tea.Cmd) {
+	if m.mode != modeStats30 {
+		return m, nil
+	}
+	if m.statsWindowEnd.IsZero() {
+		m.statsWindowEnd = m.statsEnd
+	}
+
+	// Compute the proposed new selected date.
+	var proposed time.Time
+	if m.selectedDate.IsZero() {
+		// First ← enters drill-down mode at today.
+		proposed = m.statsEnd
+	} else {
+		proposed = m.selectedDate.AddDate(0, 0, -1)
+	}
+
+	// Hard left boundary: don't let the user scroll before the earliest
+	// completion in the user's data. oldestDataDate.IsZero() means we either
+	// haven't loaded it yet (initial frames) or there's no data at all — in
+	// both cases fall through and let the user explore freely.
+	if !m.oldestDataDate.IsZero() && proposed.Before(m.oldestDataDate) && !sameDay(proposed, m.oldestDataDate) {
+		cmd := m.setTransientFooter(m.strings.NoOlderData())
+		return m, cmd
+	}
+
+	m.selectedDate = proposed
+	// Shift window left if selectedDate is before the window's left edge.
+	windowStart := m.statsWindowEnd.AddDate(0, 0, -29)
+	if m.selectedDate.Before(windowStart) {
+		m.statsWindowEnd = m.statsWindowEnd.AddDate(0, 0, -1)
+	}
+	m.selectedScroll = 0
+	return m, m.cmdLoadTasksOnDate(m.selectedDate)
+}
+
+// statsScrollRight moves selectedDate one day later, stopping at today.
+func (m Model) statsScrollRight() (Model, tea.Cmd) {
+	if m.mode != modeStats30 || m.selectedDate.IsZero() {
+		return m, nil
+	}
+	if m.statsWindowEnd.IsZero() {
+		m.statsWindowEnd = m.statsEnd
+	}
+
+	// Don't allow selecting future dates. Compare by calendar day so identical
+	// dates with different times of day (selectedDate carries clock from now)
+	// don't trip the bound.
+	if sameDay(m.selectedDate, m.statsEnd) {
+		return m, nil
+	}
+	next := m.selectedDate.AddDate(0, 0, 1)
+	m.selectedDate = next
+	// Shift window right if selectedDate is past the window's right edge.
+	if m.selectedDate.After(m.statsWindowEnd) && !sameDay(m.selectedDate, m.statsWindowEnd) {
+		m.statsWindowEnd = m.selectedDate
+	}
+	m.selectedScroll = 0
+	return m, m.cmdLoadTasksOnDate(m.selectedDate)
+}
+
+
+// toggleLang flips EN ↔ ZH, refreshes the strings table, and persists the
+// new language to the config file. The data set is unchanged so we don't
+// reload tasks. If config persistence fails we still flip in-memory and
+// surface the error via a transient footer (next launch may revert, but the
+// session keeps working).
+func (m Model) toggleLang() (Model, tea.Cmd) {
+	m.lang = m.lang.Toggle()
+	m.strings = i18n.For(m.lang)
+	if m.configPath == "" {
+		return m, nil
+	}
+	if err := setLangPersist(m.configPath, m.lang.String()); err != nil {
+		cmd := m.setTransientFooter(m.strings.ConfigWriteFailed(err.Error()))
+		m.footerErr = true
+		return m, cmd
+	}
+	return m, nil
+}
+
+// ----- settings mode --------------------------------------------------------
+
+// i18nLangToSetupLang bridges the two independent Lang types. Both packages
+// keep their own enum on purpose (see CLAUDE.md design decision 16); this is
+// the single explicit boundary mapping.
+func i18nLangToSetupLang(l i18n.Lang) setup.Lang {
+	if l == i18n.LangZH {
+		return setup.LangZH
+	}
+	return setup.LangEN
+}
+
+func (m Model) enterSettings() (Model, tea.Cmd) {
+	vaults := setup.DetectObsidianVaults()
+	m.mode = modeSettings
+	// Inherit current TUI language so the wizard opens in the user's chosen
+	// language; user can still Tab inside the wizard for that session only.
+	m.settingsModel = setup.NewModel(i18nLangToSetupLang(m.lang), vaults)
+	m.settingsChosen = ""
+	m.configUpdated = false
+	return m, nil
+}
+
+// handleSettingsKey dispatches to the wizard sub-model and translates its
+// outbound signals into parent-mode transitions.
+//
+// Contract: the wizard's subCmd is *never* propagated. tea.Quit from the
+// sub-model means "I'm done" (either chose a path or cancelled), not "kill
+// the whole app". We inspect Chosen()/QuitRequested() to decide which.
+//
+// The parent does NOT inspect any specific key (ESC, etc.) — that would
+// double-handle keys the sub-model already consumed. Sub-model state is the
+// single source of truth.
+func (m Model) handleSettingsKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	newSubModel, subCmd := m.settingsModel.Update(msg)
+	m.settingsModel = newSubModel.(setup.Model)
+
+	// Path 1: user picked a tasks file → persist + return to list. Discard
+	// subCmd (it's tea.Quit, intended only for the standalone wizard host).
+	if chosen := m.settingsModel.Chosen(); chosen != "" && !m.configUpdated {
+		if err := config.WriteFull(config.DefaultPath(), chosen, m.lang.String()); err != nil {
+			m.mode = modeList
+			cmd := m.setTransientFooter(m.strings.ConfigWriteFailed(err.Error()))
+			m.footerErr = true
+			return m, cmd
+		}
+		m.configUpdated = true
+		m.settingsChosen = chosen
+		m.mode = modeList
+		m.footerMsg = m.strings.ConfigUpdated()
+		m.footerToken++
+		return m, m.drainPendingReload()
+	}
+
+	// Path 2: user cancelled (ctrl+c, or ESC from modePick). Discard subCmd
+	// (also tea.Quit) so the parent app keeps running.
+	if m.settingsModel.QuitRequested() {
+		m.mode = modeList
+		return m, m.drainPendingReload()
+	}
+
+	// Path 3: still inside the wizard (typing in custom path, navigating
+	// items, ESC from modeCustom → modePick). subCmd is safe to forward
+	// here — it's never tea.Quit on this path (all tea.Quit paths set
+	// chosen or quitRequested above), but it may carry textinput.Blink
+	// that the cursor animation needs.
+	return m, subCmd
 }
 
 // focusField sets focus on the appropriate textinput.

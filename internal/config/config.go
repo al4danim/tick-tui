@@ -11,11 +11,14 @@ import (
 const configTemplate = `# tick TUI configuration
 # Path to your tasks markdown file. archive.md is created in the same directory.
 TICK_TASKS_FILE=
+# UI language: en or zh. Toggle in-app with l.
+TICK_LANG=en
 `
 
 // Config holds runtime configuration read from ~/.config/tick/config.
 type Config struct {
 	TasksFile string
+	Lang      string // "en" or "zh"; empty == default ("en")
 }
 
 // Exists reports whether the config file is present. Used by main to decide
@@ -26,17 +29,44 @@ func Exists(path string) bool {
 }
 
 // Write creates ~/.config/tick/config (mode 0600, parent dir 0700) with the
-// given tasks file path. Used by the setup wizard on first launch.
+// given tasks file path. Lang defaults to "en". This signature is preserved
+// for the existing call site (setup wizard); use WriteFull to also set Lang.
 func Write(path, tasksFile string) error {
+	return WriteFull(path, tasksFile, "")
+}
+
+// WriteFull writes both TICK_TASKS_FILE and TICK_LANG. Empty lang is treated
+// as "en" so the config file always has an explicit value.
+func WriteFull(path, tasksFile, lang string) error {
+	if lang == "" {
+		lang = "en"
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	body := fmt.Sprintf("# tick TUI configuration\n# Path to your tasks markdown file. archive.md is created in the same directory.\nTICK_TASKS_FILE=%s\n", tasksFile)
+	body := fmt.Sprintf(
+		"# tick TUI configuration\n"+
+			"# Path to your tasks markdown file. archive.md is created in the same directory.\n"+
+			"TICK_TASKS_FILE=%s\n"+
+			"# UI language: en or zh. Toggle in-app with l.\n"+
+			"TICK_LANG=%s\n",
+		tasksFile, lang,
+	)
 	return os.WriteFile(path, []byte(body), 0o600)
 }
 
+// SetLang reads the existing config (preserving TasksFile), updates only
+// TICK_LANG, and rewrites the file. Used by the in-app `l` toggle.
+func SetLang(path, lang string) error {
+	cfg, err := Load(path)
+	if err != nil {
+		return err
+	}
+	return WriteFull(path, cfg.TasksFile, lang)
+}
+
 // Load reads the config file at the given path. If TICK_TASKS_FILE is missing
-// or empty, falls back to ~/.tick/tasks.md.
+// or empty, falls back to ~/.tick/tasks.md. TICK_LANG defaults to "en".
 //
 // Caller is expected to check Exists() first; Load on a missing file still
 // works (returns the default) but the wizard should run before reaching here
@@ -50,7 +80,7 @@ func Load(path string) (*Config, error) {
 		// user to override later.
 	}
 
-	cfg := &Config{TasksFile: defaultTasksFile()}
+	cfg := &Config{TasksFile: defaultTasksFile(), Lang: "en"}
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -77,6 +107,10 @@ func Load(path string) (*Config, error) {
 		case "TICK_TASKS_FILE":
 			if v != "" {
 				cfg.TasksFile = expandUser(v)
+			}
+		case "TICK_LANG":
+			if v != "" {
+				cfg.Lang = v
 			}
 		}
 	}
