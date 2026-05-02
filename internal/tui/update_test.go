@@ -1598,6 +1598,7 @@ func (s *stubClient) OldestCompletionDate() (time.Time, error) {
 	}
 	return time.Time{}, nil
 }
+func (s *stubClient) ComputeStreak(today time.Time) (int, error) { return 0, nil }
 
 
 // itoa is defined in update.go (package tui), no duplicate needed here.
