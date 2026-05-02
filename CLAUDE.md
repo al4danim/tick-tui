@@ -5,10 +5,10 @@
 `tick-tui` 是 Tick 任务管理系统的命令行 TUI 客户端，基于 Go + bubbletea。
 设计理念是 lazygit 风格的窄窗口（约 40 字符宽），全程同一画面，没有任何弹框 / modal / popup —— 所有编辑就地内联。
 
-数据直接读写本地 markdown 文件（路径由首次启动 wizard 决定，默认 fallback `~/.tick/tasks.md`），**不再依赖任何服务端**。
+数据直接读写本地 markdown 文件（路径由首次启动 wizard 决定，默认 fallback `~/tick/tasks.md`），**不再依赖任何服务端**。
 推荐放在 Obsidian vault 里，手机端在 Obsidian 里手敲新任务即可，tick-tui 启动时自动补全 metadata。
 
-我（开发者）个人的实际路径是 `~/hoard/.tick/tasks.md`（hoard = 我的 Obsidian vault），仅作为本文档中举例参考；新用户的路径由 wizard 选定。
+我（开发者）个人的实际路径是 `~/Documents/hoard/tick/tasks.md`（hoard = 我的 Obsidian vault），仅作为本文档中举例参考；新用户的路径由 wizard 选定。
 
 ## 架构
 
@@ -310,12 +310,12 @@ TICK_LANG=en        # 或 zh；按 l 即时切换并回写
 ```
 
 行内注释 ` #`（空格 + 井号）会被截断。空值或字段缺失时 fallback：
-- `TICK_TASKS_FILE` → `~/.tick/tasks.md`
+- `TICK_TASKS_FILE` → `~/tick/tasks.md`
 - `TICK_LANG` → `en`
 
 `archive.md` 自动放在 tasks.md 同一目录。
 
-Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或 `~/.config/obsidian/obsidian.json`（Linux）列出已注册的 vault；用户选 vault 后路径自动拼成 `<vault>/.tick/tasks.md`。Wizard 内 `l` 切英中（与主屏统一；路径输入框内 `l` 是普通字符，要切语言先 Esc 回选项页再按 `l`；仅影响 wizard 屏，主屏的 `l` 键独立持久化到 TICK_LANG）。
+Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或 `~/.config/obsidian/obsidian.json`（Linux）列出已注册的 vault；用户选 vault 后路径自动拼成 `<vault>/tick/tasks.md`。Wizard 内 `l` 切英中（与主屏统一；路径输入框内 `l` 是普通字符，要切语言先 Esc 回选项页再按 `l`；仅影响 wizard 屏，主屏的 `l` 键独立持久化到 TICK_LANG）。
 
 ## 后续待做（v2）
 
@@ -335,12 +335,12 @@ Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或
 6. **rowDraft phantom**：按 a 在 rows 顶部插一行 phantom，不动 m.today；exitEdit 通过 buildRows 自动清理。
 7. **`a` 永远 sticky**：连续新建是默认；不再保留"加一条退出"的非 sticky 模式。
 8. **8 字符 hex 随机 ID（不是顺序整数）**：手机插件 + Mac CLI 双向同步时，两端按"max+1"会撞 ID（实际遇到过 [63] 同 ID 导致 mark-done 走错行）。32 bit hex 碰撞概率近 0；sweep 还会兜底 re-roll 重复。
-9. **dot-prefix `.tick/` 目录**：放进 Obsidian vault 时被原生文件树自动隐藏，避免用户在 Obsidian 编辑器里改 markdown 导致 ID/状态错乱。
-10. **首次启动 wizard，不强制 hard-coded 路径**：`internal/setup/wizard.go` 扫 obsidian.json 列出 vaults，让用户选 vault 或自定义路径或默认 `~/.tick/tasks.md`。Tab 或 l 切英中（modeCustom 下只能 Tab）。配置写到 `~/.config/tick/config` 后续不再问。
+9. **plain `tick/` 目录 + 插件层隐藏（v0.6.0 反转决策）**：v0.5.0 之前用 `.tick/` dot-prefix，靠 Obsidian 文件树原生隐藏 dot 目录避免误改 markdown。v0.6.0 改成 plain `tick/`，理由：**Obsidian Sync 强制忽略所有 dot 文件夹且没有开关**（[2022 至今未实现的 feature request](https://forum.obsidian.md/t/obsidian-sync-sync-hidden-files-as-well/32123)），`.tick/` 让最常见的"vault + Obsidian Sync"组合根本无法跨设备同步。改成 plain dir 后 sync 立即可用；视觉隐藏改由 tick-obsidian 插件 onload 时注入 file-explorer CSS 完成（用户必装 tick-obsidian，所以零额外操作）。代价：纯 CLI 用户 / 不装插件的 vault 用户会在文件树看到 `tick/`，可接受（解析仍宽容，误改 ID 由 sweep 兜底）。
+10. **首次启动 wizard，不强制 hard-coded 路径**：`internal/setup/wizard.go` 扫 obsidian.json 列出 vaults，让用户选 vault 或自定义路径或默认 `~/tick/tasks.md`。Tab 或 l 切英中（modeCustom 下只能 Tab）。配置写到 `~/.config/tick/config` 后续不再问。
 11. **fsnotify 监听 + 编辑期间延迟 reload**：`internal/watcher` 监听父目录（atomic write 换 inode），消息通过 `tea.Program.Send(FileChangedMsg{})`；如果用户正在 modeEdit/Confirm/Grace/Stats/Settings，先 `m.pendingReload=true` 等回到 modeList 再 drain，避免吞掉用户半途的输入。
 12. **stats 路径只读不 sweep**：`GetCompletionsByDate` 用 `loadTasksLockedSimple()` + `loadArchive()` 纯读，不触发 ID/date 补全写盘。统计是只读路径，副作用 sweep 会破坏"不变量：loadCompletions 读 ≠ loadTasks 写"的分离设计。
 13. **两个独立 stats 键 `s`/`S`**：30 天图保持 40 列窄窗口（`barRows=5, 30 列`）；年度图需 ≥60 列（53 周 × 1 字符），宽度不足时显示单行 resize 提示而非空白或 panic。
-14. **seed `--out` 强制指定目录**：不写默认路径，避免意外污染 `~/.tick/tasks.md` 或 Obsidian vault。
+14. **seed `--out` 强制指定目录**：不写默认路径，避免意外污染 `~/tick/tasks.md` 或 Obsidian vault。
 15. **修改文件夹不做 hot-swap**：config.Write 后返回主屏，footer 提示"q to restart"；重建 store+watcher 的成本远高于一次重启。
 16. **TUI i18n 与 setup wizard i18n 解耦**：`internal/i18n` 服务于主屏（list/stats/footer/transient），`internal/setup` 内置自己的 strings 表（仅 wizard 字段）。两个独立体系：主屏 `l` 切换持久化到 `TICK_LANG`；wizard 内 `l` 切换仅当次屏内有效。理由：字段不重叠（wizard 提的"vault"/"custom path"主屏没有；主屏的"un-tick"/"copied"wizard 没有），合并会产生大量空字段并把两个独立 UI 模块耦合死。
 17. **`l` 切换语言不重载数据**：strings 是渲染层；按 l 只改 `m.lang`/`m.strings` 并写 config，不调用 `cmdLoadToday`。同一份 features 用新表重渲即可。

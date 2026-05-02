@@ -30,8 +30,8 @@ func TestNewModel_buildsItemsForVaults(t *testing.T) {
 	if m.items[0].kind != kindVault || m.items[0].label != "hoard" {
 		t.Errorf("first item: %+v", m.items[0])
 	}
-	if !gostr.Contains(m.items[0].path, "/Users/x/hoard/.tick/tasks.md") {
-		t.Errorf("vault path should resolve under .tick/: got %q", m.items[0].path)
+	if !gostr.Contains(m.items[0].path, "/Users/x/hoard/tick/tasks.md") {
+		t.Errorf("vault path should resolve under tick/: got %q", m.items[0].path)
 	}
 	if m.items[1].kind != kindDefault {
 		t.Errorf("second item should be default")
@@ -74,7 +74,7 @@ func TestUpdate_enterOnVaultPicks(t *testing.T) {
 	if out.(Model).Chosen() == "" {
 		t.Error("Chosen() should be set after Enter on vault")
 	}
-	if !gostr.HasSuffix(out.(Model).Chosen(), "/abs/v1/.tick/tasks.md") {
+	if !gostr.HasSuffix(out.(Model).Chosen(), "/abs/v1/tick/tasks.md") {
 		t.Errorf("Chosen path: %q", out.(Model).Chosen())
 	}
 	if cmd == nil {

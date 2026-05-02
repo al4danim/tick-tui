@@ -66,14 +66,14 @@ type Model struct {
 // to hide the vault options (e.g., Obsidian not installed).
 func NewModel(lang Lang, vaults []Vault) Model {
 	home, _ := os.UserHomeDir()
-	defaultPath := filepath.Join(home, ".tick", "tasks.md")
+	defaultPath := filepath.Join(home, "tick", "tasks.md")
 
 	items := make([]item, 0, len(vaults)+2)
 	for _, v := range vaults {
 		items = append(items, item{
 			kind:  kindVault,
 			label: v.Name,
-			path:  filepath.Join(v.Path, ".tick", "tasks.md"),
+			path:  filepath.Join(v.Path, "tick", "tasks.md"),
 		})
 	}
 	items = append(items,

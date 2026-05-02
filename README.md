@@ -47,11 +47,13 @@ tick                         # first run shows a setup wizard
 tick --version
 ```
 
-On first launch a wizard offers to put `tasks.md` inside an Obsidian vault (auto-detected) or at the default `~/.tick/tasks.md`. The choice is saved to `~/.config/tick/config`:
+On first launch a wizard offers to put `tasks.md` inside an Obsidian vault (auto-detected) or at the default `~/tick/tasks.md`. The choice is saved to `~/.config/tick/config`:
 
 ```
-TICK_TASKS_FILE=/path/you/picked/.tick/tasks.md
+TICK_TASKS_FILE=/path/you/picked/tick/tasks.md
 ```
+
+> The directory is plain `tick/` (no dot prefix) so Obsidian Sync — which silently ignores dot-prefixed folders — can sync it across devices. Install the companion [tick-obsidian](https://github.com/al4danim/tick-obsidian) plugin to hide the `tick/` folder from Obsidian's file tree.
 
 `archive.md` is auto-created in the same directory. Edit the config file directly to relocate later.
 

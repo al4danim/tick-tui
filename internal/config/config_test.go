@@ -35,8 +35,8 @@ func TestLoad_emptyValueFallsBackToDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if !strings.HasSuffix(cfg.TasksFile, "/.tick/tasks.md") {
-		t.Errorf("TasksFile should fall back to default ~/.tick/tasks.md, got %q", cfg.TasksFile)
+	if !strings.HasSuffix(cfg.TasksFile, "/tick/tasks.md") {
+		t.Errorf("TasksFile should fall back to default ~/tick/tasks.md, got %q", cfg.TasksFile)
 	}
 }
 

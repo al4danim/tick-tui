@@ -66,7 +66,7 @@ func SetLang(path, lang string) error {
 }
 
 // Load reads the config file at the given path. If TICK_TASKS_FILE is missing
-// or empty, falls back to ~/.tick/tasks.md. TICK_LANG defaults to "en".
+// or empty, falls back to ~/tick/tasks.md. TICK_LANG defaults to "en".
 //
 // Caller is expected to check Exists() first; Load on a missing file still
 // works (returns the default) but the wizard should run before reaching here
@@ -128,12 +128,11 @@ func DefaultPath() string {
 
 func defaultTasksFile() string {
 	home, _ := os.UserHomeDir()
-	// .tick/ rather than tick/ — the dot keeps the data directory out of
-	// Obsidian's default file tree (when the user opts to put it inside a
-	// vault), so they can't accidentally edit a row in a way that confuses
-	// the parser. Default is in $HOME (no vault) — the wizard offers vault
-	// paths separately.
-	return filepath.Join(home, ".tick", "tasks.md")
+	// Plain "tick/" (no dot prefix) so Obsidian Sync — which silently ignores
+	// dot-prefixed folders — can sync the data directory between devices.
+	// The companion tick-obsidian plugin hides this folder from the file tree
+	// when active, so visual UX matches the old .tick/ behavior.
+	return filepath.Join(home, "tick", "tasks.md")
 }
 
 // expandUser turns a leading ~ into $HOME.
