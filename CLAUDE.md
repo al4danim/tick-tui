@@ -335,7 +335,7 @@ Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或
 6. **rowDraft phantom**：按 a 在 rows 顶部插一行 phantom，不动 m.today；exitEdit 通过 buildRows 自动清理。
 7. **`a` 永远 sticky**：连续新建是默认；不再保留"加一条退出"的非 sticky 模式。
 8. **8 字符 hex 随机 ID（不是顺序整数）**：手机插件 + Mac CLI 双向同步时，两端按"max+1"会撞 ID（实际遇到过 [63] 同 ID 导致 mark-done 走错行）。32 bit hex 碰撞概率近 0；sweep 还会兜底 re-roll 重复。
-9. **plain `tick/` 目录 + 插件层隐藏（v0.6.0 反转决策）**：v0.5.0 之前用 `.tick/` dot-prefix，靠 Obsidian 文件树原生隐藏 dot 目录避免误改 markdown。v0.6.0 改成 plain `tick/`，理由：**Obsidian Sync 强制忽略所有 dot 文件夹且没有开关**（[2022 至今未实现的 feature request](https://forum.obsidian.md/t/obsidian-sync-sync-hidden-files-as-well/32123)），`.tick/` 让最常见的"vault + Obsidian Sync"组合根本无法跨设备同步。改成 plain dir 后 sync 立即可用；视觉隐藏改由 tick-obsidian 插件 onload 时注入 file-explorer CSS 完成（用户必装 tick-obsidian，所以零额外操作）。代价：纯 CLI 用户 / 不装插件的 vault 用户会在文件树看到 `tick/`，可接受（解析仍宽容，误改 ID 由 sweep 兜底）。
+9. **plain `tick/` 目录 + 插件层隐藏（v0.5.1 反转决策）**：v0.5.0 之前用 `.tick/` dot-prefix，靠 Obsidian 文件树原生隐藏 dot 目录避免误改 markdown。v0.5.1 改成 plain `tick/`，理由：**Obsidian Sync 强制忽略所有 dot 文件夹且没有开关**（[2022 至今未实现的 feature request](https://forum.obsidian.md/t/obsidian-sync-sync-hidden-files-as-well/32123)），`.tick/` 让最常见的"vault + Obsidian Sync"组合根本无法跨设备同步。改成 plain dir 后 sync 立即可用；视觉隐藏改由 tick-obsidian 插件 onload 时注入 file-explorer CSS 完成（用户必装 tick-obsidian，所以零额外操作）。代价：纯 CLI 用户 / 不装插件的 vault 用户会在文件树看到 `tick/`，可接受（解析仍宽容，误改 ID 由 sweep 兜底）。
 10. **首次启动 wizard，不强制 hard-coded 路径**：`internal/setup/wizard.go` 扫 obsidian.json 列出 vaults，让用户选 vault 或自定义路径或默认 `~/tick/tasks.md`。Tab 或 l 切英中（modeCustom 下只能 Tab）。配置写到 `~/.config/tick/config` 后续不再问。
 11. **fsnotify 监听 + 编辑期间延迟 reload**：`internal/watcher` 监听父目录（atomic write 换 inode），消息通过 `tea.Program.Send(FileChangedMsg{})`；如果用户正在 modeEdit/Confirm/Grace/Stats/Settings，先 `m.pendingReload=true` 等回到 modeList 再 drain，避免吞掉用户半途的输入。
 12. **stats 路径只读不 sweep**：`GetCompletionsByDate` 用 `loadTasksLockedSimple()` + `loadArchive()` 纯读，不触发 ID/date 补全写盘。统计是只读路径，副作用 sweep 会破坏"不变量：loadCompletions 读 ≠ loadTasks 写"的分离设计。
@@ -356,7 +356,7 @@ Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或
 
 | 仓库 | 干什么用 | 当前版本 |
 |---|---|---|
-| [`al4danim/tick-tui`](https://github.com/al4danim/tick-tui) | CLI 源代码 + GitHub Actions release | v0.3.0 |
+| [`al4danim/tick-tui`](https://github.com/al4danim/tick-tui) | CLI 源代码 + GitHub Actions release | v0.5.2 |
 | [`al4danim/tick-obsidian`](https://github.com/al4danim/tick-obsidian) | Obsidian 插件源代码 | 0.2.1 |
 | [`al4danim/homebrew-tick`](https://github.com/al4danim/homebrew-tick) | Homebrew tap formula | 跟 tick-tui 同步 |
 
@@ -364,7 +364,7 @@ Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或
 1. `tick-tui` 改完 → bump tag `vX.Y.Z` → push → `.github/workflows/release.yml` 跑 goreleaser → 4 平台 binary 上 GitHub Releases，formula 自动推到 `homebrew-tick`
 2. `tick-obsidian` 改完 → bump `manifest.json` + `package.json` + `versions.json` 三个版本号 → tag `X.Y.Z`（无 v 前缀，Obsidian 惯例）→ push → action 上传 `main.js` / `manifest.json` / `styles.css` 到 release
 
-GitHub Actions 推 formula 到 `homebrew-tick` 用的是 fine-grained PAT，存为 `tick-tui` 仓库的 `HOMEBREW_TAP_TOKEN` secret。PAT 必须有 `al4danim/homebrew-tick` 的 `Contents: Read and write`。**目前 PAT 状态待确认**（v0.3.0 release 时 brew 推送 403，formula 是手工推的）。
+GitHub Actions 推 formula 到 `homebrew-tick` 用的是 fine-grained PAT，存为 `tick-tui` 仓库的 `HOMEBREW_TAP_TOKEN` secret。PAT 必须有 `al4danim/homebrew-tick` 的 `Contents: Read and write`。v0.4.0 起 goreleaser 自动推送 formula 已通（v0.3.0 release 时 brew 推送 403，formula 是手工推的）。
 
 用户安装：
 - CLI：`brew tap al4danim/tick && brew install tick`
