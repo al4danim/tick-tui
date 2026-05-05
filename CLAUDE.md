@@ -364,7 +364,7 @@ Wizard 会扫 `~/Library/Application Support/obsidian/obsidian.json`（Mac）或
 1. `tick-tui` 改完 → bump tag `vX.Y.Z` → push → `.github/workflows/release.yml` 跑 goreleaser → 4 平台 binary 上 GitHub Releases，formula 自动推到 `homebrew-tick`
 2. `tick-obsidian` 改完 → bump `manifest.json` + `package.json` + `versions.json` 三个版本号 → tag `X.Y.Z`（无 v 前缀，Obsidian 惯例）→ push → action 上传 `main.js` / `manifest.json` / `styles.css` 到 release
 
-GitHub Actions 推 formula 到 `homebrew-tick` 用的是 fine-grained PAT，存为 `tick-tui` 仓库的 `HOMEBREW_TAP_TOKEN` secret。PAT 必须有 `al4danim/homebrew-tick` 的 `Contents: Read and write`。v0.4.0 起 goreleaser 自动推送 formula 已通（v0.3.0 release 时 brew 推送 403，formula 是手工推的）。
+GitHub Actions 推 formula 到 `homebrew-tick` 用的是 fine-grained PAT，存为 `tick-tui` 仓库的 `HOMEBREW_TAP_TOKEN` secret。PAT 必须有 `al4danim/homebrew-tick` 的 `Contents: Read and write`。**已知问题**：v0.3.0 / v0.5.0 / v0.5.1 release 时 brew 推送都报 403 `Resource not accessible by integration`，formula 长期手工推（每次发版后手动 git commit 新版 formula 到 homebrew-tick）。release.yml 上的 PAT 应该重新签发 / 验证 fine-grained 权限范围。
 
 用户安装：
 - CLI：`brew tap al4danim/tick && brew install tick`
