@@ -13,6 +13,22 @@ import (
 	"github.com/al4danim/tick-tui/internal/watcher"
 )
 
+const topUsage = `tick — terminal task manager (markdown-backed)
+
+usage:
+  tick               launch the TUI
+  tick add           batch-add tasks from stdin (for scripts / AI agents)
+  tick --version     print version
+  tick --help        this message
+
+quick add:
+  echo '买菜 @家庭' | tick add
+  printf '%s\n' 'task1 @proj' 'task2' | tick add
+  echo '[{"title":"t1","project":"p"}]' | tick add --json
+
+see ` + "`tick add --help`" + ` for the full add spec.
+`
+
 // Set by goreleaser via -ldflags at build time.
 var (
 	version = "dev"
@@ -21,10 +37,16 @@ var (
 )
 
 func main() {
-	for _, a := range os.Args[1:] {
-		if a == "--version" || a == "-v" {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--version", "-v":
 			fmt.Printf("tick %s (%s, %s)\n", version, commit, date)
 			return
+		case "--help", "-h", "help":
+			fmt.Print(topUsage)
+			return
+		case "add":
+			os.Exit(runAdd(os.Args[2:]))
 		}
 	}
 

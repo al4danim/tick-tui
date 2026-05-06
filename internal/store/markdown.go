@@ -416,6 +416,55 @@ func (s *Store) Create(text, date string) (*Feature, error) {
 	return &f, nil
 }
 
+// NewTask is one item in a batch insert. Title may include an `@project`
+// suffix (parsed the same way as Create); an explicit Project overrides it.
+// Date is YYYY-MM-DD; empty means today.
+type NewTask struct {
+	Title   string
+	Project string
+	Date    string
+}
+
+// CreateBatch appends multiple tasks in a single load+save cycle. Returns the
+// inserted Features (with assigned IDs) in input order.
+func (s *Store) CreateBatch(items []NewTask) ([]Feature, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	features, err := s.loadTasksLockedSimple()
+	if err != nil {
+		return nil, err
+	}
+
+	today := time.Now().Format("2006-01-02")
+	created := make([]Feature, 0, len(items))
+	for _, it := range items {
+		title, proj := splitProjectSuffix(it.Title)
+		if it.Project != "" {
+			proj = it.Project
+		}
+		date := it.Date
+		if date == "" {
+			date = today
+		}
+		f := Feature{
+			ID:        genID(),
+			Title:     title,
+			CreatedAt: date,
+		}
+		if proj != "" {
+			f.ProjectName = &proj
+		}
+		features = append(features, f)
+		created = append(created, f)
+	}
+
+	if err := s.saveTasksLocked(features); err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
 // Update edits an existing task's title and project (and optionally date).
 func (s *Store) Update(id string, title, project string, date *string) (*Feature, error) {
 	s.mu.Lock()

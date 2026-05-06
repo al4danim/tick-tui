@@ -258,7 +258,11 @@ func groupByProject(features []store.Feature) []store.Feature {
 	})
 	out := make([]store.Feature, 0, len(features))
 	for _, name := range order {
-		out = append(out, groups[name].items...)
+		items := groups[name].items
+		sort.SliceStable(items, func(i, j int) bool {
+			return items[i].Title < items[j].Title
+		})
+		out = append(out, items...)
 	}
 	return out
 }
